@@ -1,0 +1,81 @@
+# AIS-SAT-PIPELINE 경로 설정
+# 데이터셋 및 결과물 저장 경로
+
+# 프로젝트 루트 (자동 설정)
+root_dir: "."
+
+# 원본 데이터셋 경로
+raw_data:
+  # Kaggle Airbus Ship Detection Dataset
+  airbus_train_v2: "data/raw/airbus/train_v2"
+  airbus_masks: "data/raw/airbus/train_ship_segmentations_v2.csv"
+
+  # VLEO 위성 이미지 (실제 데이터)
+  vleo_images: "data/raw/vleo/images"
+  vleo_labels: "data/raw/vleo/labels"
+
+# 전처리된 데이터셋 (YOLO format)
+processed_data:
+  # HR 데이터셋
+  hr_train_images: "data/processed/hr/train/images"
+  hr_train_labels: "data/processed/hr/train/labels"
+  hr_val_images: "data/processed/hr/val/images"
+  hr_val_labels: "data/processed/hr/val/labels"
+  hr_test_images: "data/processed/hr/test/images"
+  hr_test_labels: "data/processed/hr/test/labels"
+
+  # LR 데이터셋 (degradation 적용)
+  lr_train_images: "data/processed/lr/train/images"
+  lr_val_images: "data/processed/lr/val/images"
+  lr_test_images: "data/processed/lr/test/images"
+
+  # Data split 정보
+  split_info: "data/processed/split_info.yaml"
+
+# 사전 학습 모델 가중치
+pretrained:
+  # SR 모델
+  rfdn: "pretrained/sr/rfdn_x4.pth"
+  mamba_sr: "pretrained/sr/mamba_sr_x4.pth"
+  ttst: "pretrained/sr/ttst_x4.pth"
+
+  # YOLO 모델
+  yolov8n: "pretrained/detection/yolov8n.pt"
+  yolov8s: "pretrained/detection/yolov8s.pt"
+  yolov8m: "pretrained/detection/yolov8m.pt"
+
+# 학습 결과물
+outputs:
+  # 체크포인트
+  checkpoints: "checkpoints"
+
+  # 로그
+  logs: "logs"
+  tensorboard: "logs/tensorboard"
+  wandb_cache: "logs/wandb"
+
+  # 평가 결과
+  eval_results: "results/eval"
+  visualizations: "results/visualizations"
+
+  # 추론 결과
+  inference_results: "results/inference"
+
+# 분석 결과
+analysis:
+  ship_size_distribution: "analysis/ship_sizes.json"
+  performance_metrics: "analysis/metrics"
+  ablation_studies: "analysis/ablation"
+
+  # Jetson Xavier NX profiling
+  profiling:
+    latency: "analysis/profiling/latency"
+    memory: "analysis/profiling/memory"
+    power: "analysis/profiling/power"
+
+# 문서 및 자료
+docs:
+  master_doc: "docs/MASTER_DOCUMENT.md"
+  work_guide: "docs/WORK_DISTRIBUTION_GUIDE.md"
+  figures: "docs/figures"
+  tables: "docs/tables"

@@ -1,0 +1,79 @@
+# Architecture 0: Sequential Pipeline (Baseline)
+# LR → SR → HR → Detection
+# 가장 간단한 2-stage 접근법
+
+# Base config 상속
+defaults:
+  - ../default.yaml
+
+experiment:
+  name: "arch0_sequential_baseline"
+  description: "Sequential SR-then-Detect baseline"
+  architecture: "arch0"
+
+# Architecture 특화 설정
+model:
+  pipeline: "arch0_sequential"
+  sr_model: "rfdn"
+  detector: "yolov8n"
+
+  # Sequential 특화 옵션
+  arch0:
+    detach_sr: true  # SR과 Detection 간 gradient 차단
+    use_hr_gt: false  # HR GT 사용 여부 (available한 경우)
+
+# Training strategy
+training:
+  # Phase 1: SR 모델만 학습
+  phases:
+    - name: "sr_only"
+      epochs: 100
+      freeze_detector: true
+      loss_weights:
+        sr_alpha: 1.0
+        det_beta: 0.0
+
+    # Phase 2: SR 고정, Detector 학습
+    - name: "detector_only"
+      epochs: 150
+      freeze_sr: true
+      loss_weights:
+        sr_alpha: 0.0
+        det_beta: 1.0
+
+    # Phase 3: Joint fine-tuning (선택적)
+    - name: "joint_finetune"
+      epochs: 50
+      freeze_sr: false
+      freeze_detector: false
+      loss_weights:
+        sr_alpha: 0.3
+        det_beta: 0.7
+
+# Evaluation
+evaluation:
+  # SR 품질 측정
+  measure_sr_quality: true
+  sr_metrics:
+    - "PSNR"
+    - "SSIM"
+    - "LPIPS"
+
+  # Detection 성능 측정
+  detection_metrics:
+    - "mAP@0.5"
+    - "mAP@0.75"
+    - "Recall"
+    - "Precision"
+
+# Expected characteristics
+expected_performance:
+  pros:
+    - "SR 품질 높음 (dedicated training)"
+    - "구현 단순"
+    - "각 모듈 독립적"
+
+  cons:
+    - "Latency 높음 (2-pass)"
+    - "SR 오류가 Detection에 전파"
+    - "메모리 사용량 큼 (HR 이미지 저장)"

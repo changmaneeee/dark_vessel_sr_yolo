@@ -1,0 +1,161 @@
+# AIS-SAT-PIPELINE .gitignore
+
+# Data & Datasets
+data/
+datasets/
+*.csv
+*.json
+*.h5
+*.hdf5
+
+# Checkpoints & Models
+checkpoints/
+pretrained/
+*.pth
+*.pt
+*.ckpt
+*.safetensors
+
+# Logs & Results
+logs/
+runs/
+results/
+outputs/
+wandb/
+tensorboard/
+*.log
+
+# Jupyter Notebooks
+.ipynb_checkpoints/
+notebooks/*.html
+notebooks/*.pdf
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+*.manifest
+*.spec
+pip-log.txt
+pip-delete-this-directory.txt
+
+# Virtual Environment
+venv/
+env/
+ENV/
+.venv
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# PyCharm
+.idea/
+*.iml
+*.iws
+*.ipr
+
+# VS Code
+.vscode/
+*.code-workspace
+
+# Jupyter
+.ipynb_checkpoints
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+._*
+
+# Windows
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+
+# Linux
+*~
+.directory
+.Trash-*
+
+# Testing
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+.hypothesis/
+
+# MyPy
+.mypy_cache/
+.dmypy.json
+dmypy.json
+
+# Profiling
+*.prof
+*.lprof
+*.pyprof
+
+# Temporary files
+*.tmp
+*.temp
+*.bak
+*.swp
+*.swo
+
+# Archives
+*.zip
+*.tar.gz
+*.rar
+*.7z
+
+# Large files (use Git LFS if needed)
+*.mp4
+*.avi
+*.mov
+
+# Environment variables
+.env
+.env.local
+
+# Analysis outputs
+analysis/
+*.png
+*.jpg
+*.jpeg
+!docs/figures/*.png
+!docs/figures/*.jpg
+
+# Experiment results
+experiments/
+ablation_results/
+
+# Documentation builds
+docs/_build/
+docs/.doctrees/
+
+# Cache
+.cache/
+*.cache

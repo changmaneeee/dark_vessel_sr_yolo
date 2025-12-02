@@ -1,0 +1,120 @@
+# Architecture 4: Confidence-Adaptive Pipeline
+# Detection confidence 기반 adaptive SR 적용
+# FN(False Negative) 최소화에 집중
+
+# Base config 상속
+defaults:
+  - ../default.yaml
+
+experiment:
+  name: "arch4_confidence_adaptive"
+  description: "Confidence-based adaptive SR application"
+  architecture: "arch4"
+
+# Architecture 특화 설정
+model:
+  pipeline: "arch4_adaptive"
+  sr_model: "rfdn"
+  detector: "yolov8n"
+
+  # Adaptive 메커니즘
+  arch4:
+    # 1st pass: LR detection
+    lr_conf_threshold: 0.3  # Lower threshold for LR pass
+    lr_iou_threshold: 0.45
+
+    # Adaptive criteria
+    adaptive_strategy: "confidence"  # confidence, size, both
+    sr_trigger_conf: 0.5  # SR 적용 threshold
+    sr_trigger_size: 0.02  # Relative bbox size threshold
+
+    # Refinement strategy
+    refinement_mode: "roi"  # roi (RoI만 SR), full (전체 SR)
+    roi_expansion: 1.5  # RoI 확장 비율
+
+    # 2nd pass: SR + detection
+    hr_conf_threshold: 0.25
+    hr_iou_threshold: 0.45
+
+# Training strategy
+training:
+  epochs: 300
+  batch_size: 6  # Smaller due to 2-pass
+
+  # 3-phase training
+  phases:
+    - name: "pretrain_components"
+      epochs: 50
+      freeze_detector: true
+      loss_weights:
+        sr_alpha: 0.8
+        det_beta: 0.2
+
+    - name: "joint_adaptive"
+      epochs: 200
+      freeze_detector: false
+      loss_weights:
+        sr_alpha: 0.4
+        det_beta: 0.6
+        adaptive_loss: 0.1  # Adaptive decision loss
+
+    - name: "finetune"
+      epochs: 50
+      loss_weights:
+        sr_alpha: 0.2
+        det_beta: 0.8
+        adaptive_loss: 0.0
+
+# Adaptive-specific loss
+losses:
+  # Adaptive decision loss
+  adaptive_decision:
+    type: "binary_cross_entropy"
+    weight: 0.1
+    target: "fn_reduction"  # Minimize false negatives
+
+  # SR quality loss (only on SR-applied regions)
+  selective_sr_loss:
+    type: "l1"
+    weight: 0.7
+    apply_on: "sr_regions"
+
+# Evaluation
+evaluation:
+  # Adaptive 전략 분석
+  analyze_adaptive_decisions: true
+  adaptive_analysis:
+    save_decision_maps: true
+    count_sr_applications: true
+    measure_fn_reduction: true
+
+  # Performance metrics
+  metrics:
+    - "mAP@0.5"
+    - "Recall"  # FN reduction 측정
+    - "Precision"
+    - "F1"
+    - "SR_Application_Rate"
+    - "Latency_Avg"
+
+  # FN analysis
+  fn_analysis:
+    size_bins: [0, 15, 30, 50, 100]  # Ship size bins (meters)
+    analyze_missed_ships: true
+
+# Expected characteristics
+expected_performance:
+  pros:
+    - "FN 최소화 (small ships)"
+    - "Adaptive latency (필요시만 SR)"
+    - "연산 효율성"
+
+  cons:
+    - "2-pass 오버헤드"
+    - "복잡한 학습 전략"
+    - "Threshold 튜닝 필요"
+
+  target_metrics:
+    recall: 0.85  # High recall target
+    sr_application_rate: 0.3  # 30% of detections trigger SR
+    latency_avg_ms: 90  # Jetson Xavier NX

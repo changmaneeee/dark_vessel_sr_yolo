@@ -1,0 +1,108 @@
+# Architecture 2: Soft Gate Network
+# LR과 SR feature를 Soft Gate로 혼합
+# 연산 효율성과 성능의 균형
+
+# Base config 상속
+defaults:
+  - ../default.yaml
+
+experiment:
+  name: "arch2_softgate"
+  description: "Soft gate fusion between LR and SR features"
+  architecture: "arch2"
+
+# Architecture 특화 설정
+model:
+  pipeline: "arch2_softgate"
+  sr_model: "rfdn"
+  detector: "yolov8n"
+  fusion_method: "softgate"
+
+  # Soft Gate 옵션
+  arch2:
+    gate_hidden_dim: 256
+    gate_activation: "sigmoid"  # sigmoid, tanh
+    temperature: 1.0  # Gating temperature
+
+    # Feature extraction points
+    lr_feature_layer: "backbone.stage3"  # YOLO backbone layer
+    sr_feature_layer: "encoder.final"    # SR encoder output
+
+    # Gate network architecture
+    gate_layers: 2
+    gate_dropout: 0.1
+
+# Training strategy
+training:
+  epochs: 300
+  batch_size: 8
+
+  # 3-phase training
+  phases:
+    - name: "pretrain_sr"
+      epochs: 50
+      freeze_detector: true
+      freeze_gate: true
+      loss_weights:
+        sr_alpha: 1.0
+        det_beta: 0.0
+        gate_reg: 0.0
+
+    - name: "joint_training"
+      epochs: 200
+      freeze_detector: false
+      freeze_gate: false
+      loss_weights:
+        sr_alpha: 0.5
+        det_beta: 0.5
+        gate_reg: 0.01  # Gate entropy regularization
+
+    - name: "finetune_detector"
+      epochs: 50
+      freeze_sr: true
+      freeze_gate: true
+      loss_weights:
+        sr_alpha: 0.0
+        det_beta: 1.0
+        gate_reg: 0.0
+
+# Gate-specific loss
+losses:
+  gate_regularization:
+    type: "entropy"  # Encourage decisive gating
+    weight: 0.01
+
+  # Feature alignment loss
+  feature_alignment:
+    type: "cosine"
+    weight: 0.05
+
+# Evaluation
+evaluation:
+  # Gate 분석
+  analyze_gate_values: true
+  gate_analysis:
+    save_histograms: true
+    visualize_gate_maps: true
+
+  # Performance metrics
+  metrics:
+    - "mAP@0.5"
+    - "mAP@0.75"
+    - "Inference_Time"
+    - "FLOPs"
+
+# Expected characteristics
+expected_performance:
+  pros:
+    - "LR과 SR의 adaptive 혼합"
+    - "연산 효율성 (partial SR)"
+    - "Latency 감소"
+
+  cons:
+    - "Gate network 학습 필요"
+    - "SR 품질 저하 가능"
+
+  target_metrics:
+    mAP_05: 0.65
+    latency_ms: 80  # Jetson Xavier NX

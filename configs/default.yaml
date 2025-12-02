@@ -1,0 +1,154 @@
+# AIS-SAT-PIPELINE 기본 설정
+# 모든 실험의 베이스 설정
+
+experiment:
+  name: "ais-sat-baseline"
+  seed: 42
+  device: "cuda"
+  log_dir: "logs"
+  checkpoint_dir: "checkpoints"
+
+# 모델 구성
+model:
+  sr_model: "rfdn"  # rfdn, mamba_sr, ttst
+  detector: "yolov8n"  # yolov8n, yolov8s, yolov8m
+  fusion_method: "attention"  # attention, gate, adaptive
+  scale_factor: 4
+
+# 학습 설정
+training:
+  epochs: 300
+  batch_size: 8
+  num_workers: 4
+  accumulation_steps: 1  # Gradient accumulation
+
+  # Learning rate
+  lr: 1.0e-4
+  weight_decay: 0.01
+  grad_clip: 1.0
+
+  # Loss 가중치 (Phase별 스케줄링)
+  loss_weights:
+    sr_alpha: 0.7      # SR loss weight
+    det_beta: 0.3      # Detection loss weight
+    feature_gamma: 0.0 # Feature matching loss (Arch5B 전용)
+
+  # Phase-based training schedule
+  phases:
+    - name: "warmup"
+      epochs: 50
+      freeze_detector: true
+      loss_weights:
+        sr_alpha: 1.0
+        det_beta: 0.0
+
+    - name: "joint"
+      epochs: 200
+      freeze_detector: false
+      loss_weights:
+        sr_alpha: 0.7
+        det_beta: 0.3
+
+    - name: "finetune"
+      epochs: 50
+      freeze_sr: false
+      loss_weights:
+        sr_alpha: 0.3
+        det_beta: 0.7
+
+# Optimizer
+optimizer:
+  type: "AdamW"  # Adam, AdamW, SGD
+  betas: [0.9, 0.999]
+  eps: 1.0e-8
+
+# Learning rate scheduler
+scheduler:
+  type: "CosineAnnealing"  # CosineAnnealing, MultiStep, Exponential
+  T_max: 300
+  eta_min: 1.0e-6
+  warmup_epochs: 10
+  warmup_lr: 1.0e-6
+
+# Data 설정
+data:
+  # 이미지 크기
+  hr_size: 768      # HR patch size
+  lr_size: 192      # LR patch size (hr_size / scale_factor)
+  scale_factor: 4
+
+  # 데이터셋 경로 (paths.yaml에서 override)
+  train_hr_dir: "data/train/hr"
+  train_lr_dir: "data/train/lr"
+  train_labels_dir: "data/train/labels"
+
+  val_hr_dir: "data/val/hr"
+  val_lr_dir: "data/val/lr"
+  val_labels_dir: "data/val/labels"
+
+  # Augmentation
+  augmentation:
+    horizontal_flip: true
+    vertical_flip: true
+    rotate_90: true
+    random_crop: true
+    mosaic: false  # YOLO-style mosaic augmentation
+    mixup: false
+
+  # Degradation (LR 생성)
+  degradation:
+    method: "bicubic"  # bicubic, realistic, sensor_sim
+    noise_level: 0.0   # Gaussian noise std
+    blur_kernel_size: 7
+    jpeg_quality: 90
+
+# Detection 설정
+detection:
+  conf_threshold: 0.25
+  iou_threshold: 0.45
+  max_det: 300
+
+  # Class names (VLEO ship detection)
+  classes:
+    - "ship"
+
+  # Anchor boxes (YOLO)
+  anchors: null  # Auto-computed by YOLO
+
+# Evaluation
+evaluation:
+  metrics:
+    - "mAP@0.5"
+    - "mAP@0.5:0.95"
+    - "Precision"
+    - "Recall"
+    - "F1"
+    - "PSNR"  # SR quality
+    - "SSIM"  # SR quality
+
+  val_interval: 5  # Validate every N epochs
+  save_best: true
+  save_interval: 10  # Save checkpoint every N epochs
+
+# Logging
+logging:
+  use_tensorboard: true
+  use_wandb: false
+  wandb_project: "ais-sat-pipeline"
+  log_interval: 10  # Log every N batches
+
+  # Visualization
+  visualize_samples: true
+  num_vis_samples: 4
+  vis_interval: 20  # Visualize every N epochs
+
+# Hardware
+hardware:
+  use_amp: true  # Automatic Mixed Precision
+  use_ddp: false  # Distributed Data Parallel
+  num_gpus: 1
+
+  # Jetson Xavier NX profiling
+  profile_mode: false
+  measure_latency: false
+  measure_memory: false
