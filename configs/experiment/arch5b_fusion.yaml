@@ -1,0 +1,216 @@
+# Architecture 5-B: Feature Fusion Pipeline ⭐ (주력 아키텍처)
+# SR encoder와 Detection backbone의 feature-level fusion
+# Multi-scale feature fusion으로 최고 성능 목표
+
+# Base config 상속
+defaults:
+  - ../default.yaml
+
+experiment:
+  name: "arch5b_feature_fusion"
+  description: "Multi-scale feature fusion between SR and Detection"
+  architecture: "arch5b"
+  tags: ["main", "fusion", "best_performance"]
+
+# Architecture 특화 설정
+model:
+  pipeline: "arch5b_fusion"
+  sr_model: "rfdn"  # or mamba_sr, ttst
+  detector: "yolov8n"
+  fusion_method: "attention"  # attention, concatenation, addition
+
+  # Feature Fusion 설정
+  arch5b:
+    # Fusion points (multi-scale)
+    fusion_layers:
+      - sr_layer: "encoder.stage2"
+        det_layer: "backbone.dark2"
+        fusion_dim: 128
+
+      - sr_layer: "encoder.stage3"
+        det_layer: "backbone.dark3"
+        fusion_dim: 256
+
+      - sr_layer: "encoder.stage4"
+        det_layer: "backbone.dark4"
+        fusion_dim: 512
+
+    # Fusion module
+    fusion_module:
+      type: "cross_attention"  # cross_attention, channel_attention, spatial_attention
+      num_heads: 8
+      dropout: 0.1
+      use_residual: true
+
+    # Feature alignment
+    align_features: true
+    alignment_method: "conv1x1"  # conv1x1, linear, interpolate
+
+    # SR decoder 사용 여부
+    use_sr_decoder: true  # true면 SR loss도 계산
+    sr_decoder_weight: 0.3
+
+# Training strategy
+training:
+  epochs: 350
+  batch_size: 8
+  lr: 1.0e-4
+
+  # 4-phase training (critical for fusion)
+  phases:
+    - name: "pretrain_sr"
+      epochs: 50
+      freeze_detector: true
+      freeze_fusion: true
+      loss_weights:
+        sr_alpha: 1.0
+        det_beta: 0.0
+        fusion_reg: 0.0
+
+    - name: "pretrain_detector"
+      epochs: 50
+      freeze_sr: true
+      freeze_fusion: true
+      loss_weights:
+        sr_alpha: 0.0
+        det_beta: 1.0
+        fusion_reg: 0.0
+
+    - name: "joint_fusion"
+      epochs: 200
+      freeze_sr: false
+      freeze_detector: false
+      freeze_fusion: false
+      loss_weights:
+        sr_alpha: 0.3
+        det_beta: 0.5
+        fusion_reg: 0.2  # Feature matching loss
+
+    - name: "finetune"
+      epochs: 50
+      freeze_sr: false
+      freeze_detector: false
+      freeze_fusion: true
+      loss_weights:
+        sr_alpha: 0.2
+        det_beta: 0.8
+        fusion_reg: 0.0
+
+# Fusion-specific losses
+losses:
+  # SR reconstruction loss
+  sr_loss:
+    type: "charbonnier"  # l1, l2, charbonnier
+    weight: 0.3
+
+  # Detection loss (from YOLO)
+  detection_loss:
+    box_weight: 0.05
+    cls_weight: 0.5
+    dfl_weight: 1.5
+
+  # Feature matching loss (fusion)
+  feature_matching:
+    type: "cosine"  # cosine, l2, kl
+    weight: 0.2
+    layers: ["stage2", "stage3", "stage4"]
+
+  # Perceptual loss (optional)
+  perceptual_loss:
+    use: true
+    weight: 0.1
+    layers: ["relu2_2", "relu3_3", "relu4_3"]
+
+# Optimizer (specific for fusion)
+optimizer:
+  type: "AdamW"
+  lr: 1.0e-4
+  weight_decay: 0.01
+
+  # Different LR for different modules
+  param_groups:
+    - modules: ["sr_model"]
+      lr: 5.0e-5
+
+    - modules: ["detector"]
+      lr: 1.0e-4
+
+    - modules: ["fusion"]
+      lr: 2.0e-4  # Higher LR for fusion modules
+
+# Scheduler
+scheduler:
+  type: "CosineAnnealing"
+  T_max: 350
+  eta_min: 1.0e-6
+  warmup_epochs: 20
+
+# Data augmentation (강화)
+data:
+  augmentation:
+    horizontal_flip: true
+    vertical_flip: true
+    rotate_90: true
+    random_crop: true
+    color_jitter: true
+    mosaic: true  # YOLO mosaic
+    mixup: true
+    cutmix: false
+
+# Evaluation
+evaluation:
+  metrics:
+    - "mAP@0.5"
+    - "mAP@0.5:0.95"
+    - "mAP@0.75"
+    - "Precision"
+    - "Recall"
+    - "F1"
+    - "PSNR"
+    - "SSIM"
+
+  # Fusion analysis
+  analyze_fusion: true
+  fusion_analysis:
+    visualize_attention_maps: true
+    save_feature_maps: true
+    measure_feature_similarity: true
+
+  val_interval: 5
+  save_best: true
+  save_last: true
+
+# Visualization
+visualization:
+  save_sr_outputs: true
+  save_detection_results: true
+  save_attention_maps: true
+  num_samples: 8
+
+# Expected characteristics
+expected_performance:
+  pros:
+    - "최고 detection 성능 (feature fusion)"
+    - "Multi-scale 정보 활용"
+    - "SR과 Detection의 상호보완"
+    - "End-to-end 최적화"
+
+  cons:
+    - "학습 복잡도 높음"
+    - "메모리 사용량 큼"
+    - "Hyperparameter 튜닝 필요"
+
+  target_metrics:
+    mAP_05: 0.75  # High target
+    mAP_05_095: 0.55
+    recall: 0.80
+    precision: 0.75
+    psnr: 28.0
+    latency_ms: 100  # Jetson Xavier NX
+    memory_mb: 3000
+
+# Hardware optimization (Jetson Xavier NX)
+hardware:
+  use_amp: true  # Essential for Jetson
+  use_tensorrt: false  # TensorRT conversion (deployment)
+  optimize_for_inference: false  # Training mode
