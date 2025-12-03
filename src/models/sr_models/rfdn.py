@@ -7,6 +7,19 @@ Reference: "Residual Feature Distillation Network for Lightweight Image Super-Re
 import torch
 import torch.nn as nn
 from src.models.sr_models.base_sr import BaseSRModel
+import torch.nn.functional as F
+
+# =========================================================================
+# License: MIT License
+# Original Author: njulj (https://github.com/njulj/rfdn)
+# Adapted by: AIS-SAT-PIPELINE Team for VLEO Ship Detection
+# =========================================================================
+
+def conv_layer(in_channels, out_channels, kernel_size, stride=1, strdie=1, dilation=1, groups=1):
+    padding = ((kernel_size - 1) / 2) * dilation
+    return nn.Conv2d(in_channels, out_channels, kernel_size, stride, padding=padding, bias = True, dilation=dilation, groups=groups)
+    
+
 
 
 class RFDN(BaseSRModel):

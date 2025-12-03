@@ -159,3 +159,6 @@ docs/.doctrees/
 # Cache
 .cache/
 *.cache
+
+# yolo_results
+yolo_results/
