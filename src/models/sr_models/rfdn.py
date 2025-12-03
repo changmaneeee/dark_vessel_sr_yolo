@@ -96,38 +96,94 @@ class RFDB(nn.Module):
         return out_fused + input
     
 
-
-
-
-
-class RFDN(BaseSRModel):
-    """Residual Feature Distillation Network for Super-Resolution
-
-    TODO: Implement RFDN architecture
-    - Shallow feature extraction
-    - Multiple RFD blocks
-    - Upsampling module (PixelShuffle)
-    - Reconstruction
+class PixelShufflePack(nn.Module):
+    """PixelShuffle Upsampling Module
     """
+    def __init__(self, in_channels, out_channels, upscale_factor=4): # <-- upscale_factor x4 setting
+        super(PixelShufflePack, self).__init__()
+        # channel upscaling x4
+        self.conv = conv_layer(in_channels, out_channels * (upscale_factor **2),3)
 
-    def __init__(self, scale_factor: int = 4, in_channels: int = 3, out_channels: int = 3):
-        super().__init__(scale_factor, in_channels, out_channels)
-
-        # TODO: Implement architecture
-        pass
-
-    def encode(self, x: torch.Tensor) -> torch.Tensor:
-        """Encode LR image to features
-
-        TODO: Implement feature extraction
-        """
-        # Placeholder
+        # pixel shuffle
+        self.pixel_shuffle = nn.PixelShuffle(upscale_factor)
+    
+    def forward(self, x):
+        x = self.conv(x)
+        x = self.pixel_shuffle(x)
         return x
 
-    def decode(self, features: torch.Tensor) -> torch.Tensor:
-        """Decode features to HR image
 
-        TODO: Implement upsampling and reconstruction
+class RFDN(nn.Module):
+    """
+    RFDN: Residual Feature Distillation Network
+    Modified for AIS-SAT-PIPELINE to support Feature extraction
+    """
+
+    def __init__(self, in_channels=3, out_channels= 3, nf=50, num_modules=4, upscale=4): #<-- upscale x4 setting
+        super(RFDN,self).__init__()
+        # Shallow feature extraction (RGB -> 50 channels)
+        self.fea_conv = conv_layer(in_channels, nf, 3)
+
+        # Deep Feature Extraction
+        # 4 x RFDB blocks
+        self.B1 = RFDB(in_channels=nf)
+        self.B2 = RFDB(in_channels=nf)
+        self.B3 = RFDB(in_channels=nf)
+        self.B4 = RFDB(in_channels=nf)
+
+        # Feature aggregation
+        self.c = conv_layer(nf * num_modules, nf, 1)
+
+        # Global Residual Learning
+        self.LR_conv = conv_layer(nf, nf, 3)
+
+        # Upsampler
+        self.upsampler = PixelShufflePack(nf, out_channels, upscale_factor=upscale)
+
+
+    def forward_features(self, x):
         """
-        # Placeholder
-        return features
+        Before upsampling, stop to calculation until feature extraction map
+        when combined with YOLO, call this function
+        """
+
+        out_fea = self.fea_conv(x)
+
+        out_B1 = self.B1(out_fea)
+        out_B2 = self.B2(out_B1)
+        out_B3 = self.B3(out_B2)
+        out_B4 = self.B4(out_B3)
+
+        out_B = self.c(torch.cat([out_B1, out_B2, out_B3, out_B4], dim=1))
+
+        out_lr = self.LR_conv(out_B) + out_fea
+
+        return out_lr
+    
+    def forward_reconstruct(self, x):
+        """
+        make final image from feature map
+        when only SR model is used, call this function
+        """
+        output = self.upsampler(x)
+        return output
+    
+    def forward(self, x):
+        """
+        Total pipeline runing(LR -> SR)
+        using for Arch 0
+        """
+
+        features = self.forward_features(x) # encoder LR -> feature map
+        hr_image = self.forward_reconstruct(features) # decoder feature map -> HR image
+
+        return hr_image
+
+
+
+
+
+
+
+
+
