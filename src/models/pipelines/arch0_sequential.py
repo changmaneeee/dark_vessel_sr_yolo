@@ -6,78 +6,51 @@ Baseline architecture for comparison.
 
 import torch
 import torch.nn as nn
-from typing import Dict, Any, Optional
 from src.models.pipelines.base_pipeline import BasePipeline
-
+from src.models.sr_models.rfdn import RFDN
+from src.models.detectors.yolo_wrapper import YOLOWrapper
 
 class Arch0Sequential(BasePipeline):
-    """Sequential SR-then-Detect Pipeline (Baseline)
-
-    TODO: Implement sequential pipeline
-    - Stage 1: SR (LR → HR)
-    - Stage 2: Detection (HR → Boxes)
-    - Optional: detach gradients between stages
+    """
+    [Sequential Pipeline]
+    LR Image → SR Model → HR Image(Tensor) → YOLO Detector → Detection Results
+    Base architecture for SR-Detection pipeline.
     """
 
-    def __init__(
-        self,
-        sr_model: nn.Module,
-        detector: nn.Module,
-        scale_factor: int = 4,
-        detach_sr: bool = True,
-        device: str = 'cuda'
-    ):
+    def __init__(self, config):
+        super().__init__(config)
+
+        # 1. SR Model(RFDN) Initialization
+        self.sr_model = RFDN(
+            in_channels=3,
+            out_channels=3,
+            nf = config.model.rfdn.nf,
+            num_modules=config.model.rfdn.num_modules,
+            upscale=config.data.upscale_factor
+        )
+
+        # 2. YOLO Detector Initialization
+        self.detector = YOLOWrapper(model_path=config.model.yolo.weights_path, task='detect')
+
+        # 3. YOLO Freeze
+        # 4. Before this freeze, ensure YOLO is pre-trained on HR images.
+        for param in self.detector.parameters():
+            param.requires_grad = False
+        print("✓ YOLO detector frozen")
+
+    def forward(self, x):
         """
-        Args:
-            sr_model: SR model
-            detector: Detection model
-            scale_factor: SR scale factor
-            detach_sr: Detach SR from detection gradients
-            device: Device
+        [inference/testing mode]
+        x: Low Resolution Image Tensor [B, 3, H, W]
         """
-        super().__init__(sr_model, detector, scale_factor, device)
-        self.detach_sr = detach_sr
 
-    def forward(self, lr_image: torch.Tensor) -> Dict[str, Any]:
-        """Forward pass: LR → SR → Detection
+        # 1. SR Model: LR → HR
+        # Result is not Image, but Tensor
+        sr_images = self.sr_model(x)
 
-        Args:
-            lr_image: LR input [B, 3, H, W]
+        # 2. Object Detection
+        # In-memory Transfer: Tensor → Detection Results
+        detection = self.detector(sr_images)
 
-        Returns:
-            outputs: {
-                'hr_image': SR output,
-                'detections': Detection results
-            }
-        """
-        # TODO: Implement sequential forward
-        # 1. SR: LR → HR
-        # 2. (Optional) Detach gradients
-        # 3. Detection: HR → Boxes
-        pass
+        return sr_images, detection # Return both SR image tensor and detection results(SR Image for evaluation)
 
-    def get_loss(
-        self,
-        outputs: Dict[str, Any],
-        targets: Dict[str, Any],
-        hr_image: Optional[torch.Tensor] = None
-    ) -> Dict[str, torch.Tensor]:
-        """Compute combined loss
-
-        Args:
-            outputs: Forward outputs
-            targets: Ground truth
-            hr_image: GT HR image (for SR loss)
-
-        Returns:
-            loss_dict: {
-                'total_loss': combined loss,
-                'sr_loss': SR reconstruction loss,
-                'det_loss': Detection loss
-            }
-        """
-        # TODO: Implement loss calculation
-        # - SR loss (if hr_image provided)
-        # - Detection loss
-        # - Weighted combination
-        pass
