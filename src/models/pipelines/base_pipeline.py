@@ -16,7 +16,7 @@ class BasePipeline(ABC, nn.Module):
         self.config = config
         
         self.device = getattr(config, 'device', 'cuda' if torch.cuda.is_available() else 'cpu')
-        
+
         self.sr_model: Optional[nn.Module] = None
         self.detector: Optional[nn.Module] = None
 
@@ -24,8 +24,8 @@ class BasePipeline(ABC, nn.Module):
         self._sr_weight: getattr(training_config, 'sr_weight', 0.5)
         self._det_weight: getattr(training_config, 'det_weight', 0.5)
 
-     @abstractmethod
-     def forward(self, lr_image: torch.Tensor) -> Tuple[torch.Tensor, Any]:
+    @abstractmethod
+    def forward(self, lr_image: torch.Tensor) -> Tuple[torch.Tensor, Any]:
         """
         Input: LR image tensor
         Output: SR image and detection results
@@ -48,14 +48,14 @@ class BasePipeline(ABC, nn.Module):
         conf_threshold: float = 0.25 # Confidence threshold for detection
     ) ->Dict[str, Any]:
 
-    self.eval()
+        self.eval()
 
-    sr_image, detections = self.forward(lr_image)
+        sr_image, detections = self.forward(lr_image)
 
-    results= {'detections': detections}
-    if return_sr:
-        results['sr_image'] = sr_image
-    return results
+        results= {'detections': detections}
+        if return_sr:
+            results['sr_image'] = sr_image
+        return results
 
     def freeze_sr(self) -> None:
         """Freeze SR model parameters."""
