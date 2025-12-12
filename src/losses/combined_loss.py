@@ -248,4 +248,27 @@ if __name__ == "__main__":
         model.train()
         preds = model(images)
 
-        
+        sr_image = torch.rand(2,3,640,640, device=device)
+        hr_gt = torch.rand(2,3,640,640, device=device)
+
+        loss_dict = loss_fn3(
+            sr_image=sr_image, 
+            hr_gt = hr_gt,
+            det_preds=preds,
+            det_targets=targets,
+            images=images
+        )
+
+        print("  Combined Loss Results")
+        for k, v in loss_dict.items():
+            if isinstance(v, torch.Tensor):
+                print(f"   {k}: {v.item():.6f}")
+        print("\n CombinedLoss test done.")
+        print(" DetectionLoss Module No duplication")
+
+    except ImportError:
+        print("ultralytics package not found. Skipping DetectionLoss test.")
+    except Exception as e:
+        print(f"test failed: {e}")
+        import traceback
+        traceback.print_exc()
