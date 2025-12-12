@@ -3,28 +3,36 @@
 yolo_wrapper.py - Ultralytics YOLO 완벽 통합 래퍼
 =============================================================================
 
+[역할 - 단일 책임 원칙(SRP)]
+1. 모델 로드
+2. Forward Pass (추론/학습)
+3. Feature Extraction (P3/P4/P5)
+4. Freeze/Unfreeze 관리
+
+[제외된 기능]
+- Loss 계산 → detection_loss.py로 이관
+  이유: Loss 로직이 변경될 때 이 파일을 수정할 필요 없음
+
 [지원 모델]
 - YOLOv8 (yolov8n/s/m/l/x)
 - YOLO11 (yolo11n/s/m/l/x)
-- 두 버전 모두 동일한 API로 처리
 
-[핵심 기능]
-1. compute_loss(): Ultralytics v8DetectionLoss 직접 사용
-2. extract_features(): P3/P4/P5 multi-scale feature 추출
-3. forward(): 학습/추론 모드 자동 처리
-4. freeze/unfreeze: 선택적 파라미터 고정
+[사용 예시]
+# 모델 로드
+wrapper = YOLOWrapper("yolo11s.pt")
 
-[Ultralytics 내부 구조 요약]
-- YOLO("model.pt").model → DetectionModel (실제 nn.Module)
-- DetectionModel.model → nn.ModuleList (레이어 시퀀스)
-- DetectionModel.model[-1] → Detect head
-- Detect.f → P3/P4/P5 feature 레이어 인덱스 [15, 18, 21]
+# Feature 추출 (Arch 5-B용)
+features = wrapper.extract_features(images)
+p3, p4, p5 = features['p3'], features['p4'], features['p5']
 
-[v8DetectionLoss 사용법]
-- from ultralytics.utils.loss import v8DetectionLoss
-- loss_fn = v8DetectionLoss(de_parallel_model)
-- batch = {'batch_idx': ..., 'cls': ..., 'bboxes': ..., 'img': ...}
-- total_loss, loss_items = loss_fn(preds, batch)
+# 추론
+wrapper.eval()
+detections = wrapper.predict(images)
+
+# Loss 계산은 별도 모듈에서
+from src.losses import DetectionLoss
+loss_fn = DetectionLoss(wrapper.detection_model)
+loss = loss_fn(preds, targets, images)
 
 [참고 문서]
 - Ultralytics Docs: https://docs.ultralytics.com/reference/utils/loss/
@@ -39,31 +47,15 @@ from pathlib import Path
 
 class YOLOWrapper(nn.Module):
     """
-    Ultralytics YOLO 완벽 통합 래퍼
+    Ultralytics YOLO 래퍼 (Forward & Feature Extraction 전담)
     
-    [주요 기능]
-    1. forward(): Detection 수행
-    2. compute_loss(): v8DetectionLoss로 실제 YOLO Loss 계산
-    3. extract_features(): P3/P4/P5 feature 추출 (Arch 5-B용)
-    4. predict(): NMS 포함 추론
+    [책임]
+    - 모델 실행 (Forward)
+    - Feature 추출 (P3/P4/P5)
+    - Freeze/Unfreeze 관리
     
-    [사용 예시]
-    
-    # 기본 사용
-    wrapper = YOLOWrapper("yolo11n.pt")
-    
-    # Loss 계산 (학습)
-    wrapper.train()
-    loss_dict = wrapper.compute_loss(images, targets)
-    loss_dict['total'].backward()
-    
-    # Feature 추출 (Arch 5-B)
-    features = wrapper.extract_features(images)
-    p3, p4, p5 = features['p3'], features['p4'], features['p5']
-    
-    # 추론
-    wrapper.eval()
-    detections = wrapper.predict(images)
+    [비책임]
+    - Loss 계산 → DetectionLoss 클래스에서 담당
     """
     
     def __init__(
@@ -91,7 +83,7 @@ class YOLOWrapper(nn.Module):
         
         # Feature 저장용 (hook에서 사용)
         self._features: Dict[str, torch.Tensor] = {}
-        self._hooks: List = []
+        self._feature_channels: Optional[Dict[str, int]] = None
         
         # =====================================================================
         # Ultralytics YOLO 로드
@@ -103,7 +95,7 @@ class YOLOWrapper(nn.Module):
         except ImportError:
             raise ImportError(
                 "ultralytics 패키지가 필요합니다. "
-                "pip install ultralytics 로 설치하세요."
+                "pip install ultralytics"
             )
         
         # YOLO 고수준 래퍼 로드
@@ -146,11 +138,7 @@ class YOLOWrapper(nn.Module):
     # Forward Pass
     # =========================================================================
     
-    def forward(
-        self, 
-        x: torch.Tensor,
-        return_features: bool = False
-    ) -> Union[Any, Tuple[Any, Dict[str, torch.Tensor]]]:
+    def forward(self, x: torch.Tensor) ->Any:
         """
         Forward pass
         
@@ -161,139 +149,28 @@ class YOLOWrapper(nn.Module):
         Returns:
             training=True: raw predictions (list of tensors)
             training=False: decoded predictions
-            return_features=True: (predictions, features_dict)
         """
-        if return_features:
-            features = self.extract_features(x)
-            preds = self.detection_model(x)
-            return preds, features
-        else:
-            return self.detection_model(x)
+        return self.detection_model(x)
     
-    # =========================================================================
-    # Loss Computation - Ultralytics v8DetectionLoss 사용
-    # =========================================================================
-    
-    def compute_loss(
-        self,
-        images: torch.Tensor,
-        targets: torch.Tensor
-    ) -> Dict[str, torch.Tensor]:
+    def forward_with_features(
+            self,
+            x: torch.Tensor
+    ) -> Tuple[Any, Dict[str, torch.Tensor]]:
         """
-        Ultralytics v8DetectionLoss를 사용한 Detection Loss 계산
-        
-        [중요] 이 메서드는 model.train() 상태에서 호출해야 함!
-        
+        Forward + Feature 추출을 한번에
+
         Args:
-            images: 입력 이미지 [B, 3, H, W], 값 범위 0~1
-            targets: Ground truth - YOLO 형식
-                    [N, 6] = (batch_idx, class, x_center, y_center, w, h)
-                    - batch_idx: 이 박스가 배치의 몇 번째 이미지인지 (0, 1, 2, ...)
-                    - class: 클래스 인덱스 (선박=0)
-                    - x_center, y_center, w, h: 0~1 정규화 좌표 (normalized xywh)
-        
-        Returns:
-            loss_dict: {
-                'total': 전체 loss (backward용, gradient 있음),
-                'box_loss': Box regression loss (CIoU),
-                'cls_loss': Classification loss (BCE),
-                'dfl_loss': Distribution Focal Loss
-            }
-        
-        [Ultralytics Loss 구성]
-        L_total = λ_box(7.5) × L_box + λ_cls(0.5) × L_cls + λ_dfl(1.5) × L_dfl
-        
-        [batch dictionary 형식]
-        batch = {
-            'batch_idx': [N] float32 - 각 객체의 이미지 인덱스,
-            'cls': [N] float32 - 클래스 레이블,
-            'bboxes': [N, 4] float32 - normalized xywh,
-            'img': [B, 3, H, W] - 이미지 (크기 추출용)
-        }
+            x: 입력 이미지 [B, 3, H, W]
+
+        Returns: predictions, features_dict
         """
-        # 학습 모드 확인
-        if not self.training:
-            # 평가 모드에서는 0 반환 (모니터링용)
-            return {
-                'total': torch.tensor(0.0, device=self.device),
-                'box_loss': torch.tensor(0.0, device=self.device),
-                'cls_loss': torch.tensor(0.0, device=self.device),
-                'dfl_loss': torch.tensor(0.0, device=self.device)
-            }
-        
-        # 타겟이 없으면 0 반환
-        if targets is None or len(targets) == 0:
-            return {
-                'total': torch.tensor(0.0, device=self.device, requires_grad=True),
-                'box_loss': torch.tensor(0.0, device=self.device),
-                'cls_loss': torch.tensor(0.0, device=self.device),
-                'dfl_loss': torch.tensor(0.0, device=self.device)
-            }
-        
-        # Device 이동
-        images = images.to(self.device)
-        if isinstance(targets, torch.Tensor):
-            targets = targets.to(self.device)
-        
-        # =====================================================================
-        # Loss 함수 초기화 (Lazy)
-        # =====================================================================
-        if self._loss_fn is None:
-            try:
-                from ultralytics.utils.loss import v8DetectionLoss
-                self._loss_fn = v8DetectionLoss(self.detection_model)
-                print("[YOLOWrapper] ✓ v8DetectionLoss initialized")
-            except ImportError as e:
-                raise ImportError(
-                    f"v8DetectionLoss import 실패: {e}\n"
-                    "ultralytics 버전을 확인하세요."
-                )
-        
-        # =====================================================================
-        # Forward pass (학습 모드)
-        # =====================================================================
-        # 학습 모드에서 forward하면 list[Tensor] 반환 (P3, P4, P5 raw predictions)
-        self.detection_model.train()
-        preds = self.detection_model(images)
-        
-        # =====================================================================
-        # Batch dictionary 준비
-        # =====================================================================
-        # targets: [N, 6] = (batch_idx, class, x, y, w, h)
-        batch = {
-            'batch_idx': targets[:, 0].float(),  # [N]
-            'cls': targets[:, 1].float(),         # [N]
-            'bboxes': targets[:, 2:6].float(),    # [N, 4] normalized xywh
-            'img': images,                         # [B, 3, H, W]
-        }
-        
-        # =====================================================================
-        # Loss 계산
-        # =====================================================================
-        try:
-            total_loss, loss_items = self._loss_fn(preds, batch)
-            
-            # loss_items: [box_loss, cls_loss, dfl_loss] (detached)
-            return {
-                'total': total_loss,
-                'box_loss': loss_items[0] if len(loss_items) > 0 else torch.tensor(0.0, device=self.device),
-                'cls_loss': loss_items[1] if len(loss_items) > 1 else torch.tensor(0.0, device=self.device),
-                'dfl_loss': loss_items[2] if len(loss_items) > 2 else torch.tensor(0.0, device=self.device)
-            }
-            
-        except Exception as e:
-            if self.verbose:
-                print(f"[YOLOWrapper] Warning: Loss computation failed: {e}")
-            # Fallback
-            return {
-                'total': torch.tensor(0.0, device=self.device, requires_grad=True),
-                'box_loss': torch.tensor(0.0, device=self.device),
-                'cls_loss': torch.tensor(0.0, device=self.device),
-                'dfl_loss': torch.tensor(0.0, device=self.device)
-            }
-    
+
+        features = self.extract_features(x, detach=False)
+        preds = self.detection_model(x)
+        return preds, features
+
     # =========================================================================
-    # Feature Extraction (Arch 5-B용)
+    # Feature Extraction(For Arch 5-B)
     # =========================================================================
     
     def extract_features(
@@ -357,22 +234,9 @@ class YOLOWrapper(nn.Module):
             for hook in hooks:
                 hook.remove()
         
-        # Feature 없으면 빈 텐서
-        if not self._features:
-            B = x.size(0)
-            H, W = x.size(2), x.size(3)
-            self._features = {
-                'p3': torch.zeros(B, 64, H//8, W//8, device=x.device),
-                'p4': torch.zeros(B, 128, H//16, W//16, device=x.device),
-                'p5': torch.zeros(B, 256, H//32, W//32, device=x.device)
-            }
-        
-        # 채널 정보 캐싱
-        if self._feature_channels is None:
+        if self._feature_channels is None and self._features:
             self._feature_channels = {
-                'p3': self._features['p3'].size(1),
-                'p4': self._features['p4'].size(1),
-                'p5': self._features['p5'].size(1)
+                name: feat.size(1) for name, feat in self._features.items()
             }
         
         return self._features
@@ -383,13 +247,6 @@ class YOLOWrapper(nn.Module):
         
         Returns:
             {'p3': C3, 'p4': C4, 'p5': C5}
-        
-        [사용 예시]
-        channels = wrapper.get_feature_channels()
-        fusion = AttentionFusion(
-            sr_channels=50,
-            yolo_channels=channels  # {'p3': 128, 'p4': 256, 'p5': 512}
-        )
         """
         if self._feature_channels is None:
             # Dummy forward로 채널 확인
@@ -630,96 +487,33 @@ class YOLOWrapper(nn.Module):
 
 if __name__ == "__main__":
     print("=" * 70)
-    print("YOLOWrapper 테스트 (Ultralytics 통합)")
+    print("YOLOWrapper 테스트 (SRP 적용 - Loss 제외)")
     print("=" * 70)
     
-    # GPU 사용 가능 확인
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
-    print(f"\nDevice: {device}")
-    
-    # 모델 생성
-    print("\n" + "=" * 70)
-    print("1. 모델 로드 테스트")
-    print("=" * 70)
+    print(f"Device: {device}")
     
     try:
-        wrapper = YOLOWrapper("yolov8n.pt", device=device, verbose=False)
-        print(f"\n모델 정보:")
-        for k, v in wrapper.get_model_info().items():
-            print(f"  {k}: {v}")
+        wrapper = YOLOWrapper("yolov8n.pt", device=device)
+        print(f"\n모델 정보: {wrapper.get_model_info()}")
+        
+        # Feature 추출 테스트
+        print("\n[Feature 추출 테스트]")
+        dummy = torch.randn(2, 3, 640, 640, device=device)
+        features = wrapper.extract_features(dummy)
+        for name, feat in features.items():
+            print(f"  {name}: {feat.shape}")
+        
+        # Forward 테스트
+        print("\n[Forward 테스트]")
+        wrapper.train()
+        preds = wrapper(dummy)
+        print(f"  Output type: {type(preds)}")
+        if isinstance(preds, list):
+            print(f"  Output shapes: {[p.shape for p in preds]}")
+        
+        print("\n✓ YOLOWrapper 테스트 완료!")
+        print("  (compute_loss 제거됨 - DetectionLoss 사용하세요)")
+        
     except Exception as e:
-        print(f"모델 로드 실패: {e}")
-        print("ultralytics가 설치되어 있는지 확인하세요.")
-        exit(1)
-    
-    # Feature 추출 테스트
-    print("\n" + "=" * 70)
-    print("2. Feature 추출 테스트")
-    print("=" * 70)
-    
-    dummy_input = torch.randn(2, 3, 640, 640, device=device)
-    features = wrapper.extract_features(dummy_input)
-    
-    print("\nExtracted features:")
-    for name, feat in features.items():
-        print(f"  {name}: {feat.shape}")
-    
-    print(f"\nFeature channels: {wrapper.get_feature_channels()}")
-    
-    # Loss 계산 테스트
-    print("\n" + "=" * 70)
-    print("3. Loss 계산 테스트")
-    print("=" * 70)
-    
-    wrapper.train()
-    
-    # 더미 타겟 생성 (batch_idx, class, x, y, w, h)
-    dummy_targets = torch.tensor([
-        [0, 0, 0.5, 0.5, 0.2, 0.2],  # 이미지 0, 클래스 0
-        [0, 0, 0.3, 0.7, 0.1, 0.15], # 이미지 0, 클래스 0
-        [1, 0, 0.6, 0.4, 0.25, 0.3], # 이미지 1, 클래스 0
-    ], device=device)
-    
-    loss_dict = wrapper.compute_loss(dummy_input, dummy_targets)
-    
-    print("\nLoss 결과:")
-    for name, value in loss_dict.items():
-        if isinstance(value, torch.Tensor):
-            print(f"  {name}: {value.item():.6f}")
-    
-    # Gradient 확인
-    if loss_dict['total'].requires_grad:
-        print("\n✓ total loss has gradient (can backward)")
-    else:
-        print("\n✗ total loss has no gradient")
-    
-    # Predict 테스트
-    print("\n" + "=" * 70)
-    print("4. Predict 테스트")
-    print("=" * 70)
-    
-    wrapper.eval()
-    predictions = wrapper.predict(dummy_input, conf=0.25)
-    
-    print(f"\nPredictions for {len(predictions)} images:")
-    for i, pred in enumerate(predictions):
-        num_boxes = pred['boxes'].shape[0] if pred['boxes'].numel() > 0 else 0
-        print(f"  Image {i}: {num_boxes} detections")
-    
-    # Freeze 테스트
-    print("\n" + "=" * 70)
-    print("5. Freeze/Unfreeze 테스트")
-    print("=" * 70)
-    
-    wrapper.freeze()
-    print(f"After freeze: {wrapper.count_parameters()}")
-    
-    wrapper.unfreeze()
-    print(f"After unfreeze: {wrapper.count_parameters()}")
-    
-    wrapper.freeze_backbone(10)
-    print(f"After freeze_backbone(10): {wrapper.count_parameters()}")
-    
-    print("\n" + "=" * 70)
-    print("✓ 모든 테스트 완료!")
-    print("=" * 70)
+        print(f"테스트 실패: {e}")
