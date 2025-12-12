@@ -62,6 +62,8 @@ from src.models.pipelines.base_pipeline import BasePipeline
 from src.models.sr_models.rfdn import RFDN
 from src.models.detectors.yolo_wrapper import YOLOWrapper
 from src.models.fusion.attention_fusion import MultiScaleAttentionFusion
+from src.losses.combined_loss import CombinedLoss
+from src.losses.detection_loss import DetectionLoss
 
 
 class Arch5BFusion(BasePipeline):
@@ -76,38 +78,6 @@ class Arch5BFusion(BasePipeline):
     - detector (YOLOWrapper): YOLO Backbone + Neck + Detect
     - fusion (MultiScaleAttentionFusion): SR-YOLO Feature Fusion
     
-    [Config 구조]
-    config:
-      model:
-        rfdn:
-          nf: 50
-          num_modules: 4
-        yolo:
-          weights_path: "yolo11s.pt"
-          num_classes: 1
-        fusion:
-          use_cross_attention: true
-          use_cbam: true
-          num_heads: 4
-      data:
-        upscale_factor: 4
-        lr_size: 192
-      training:
-        sr_weight: 0.3
-        det_weight: 0.7
-        phase_schedule: true
-    
-    [사용 예시]
-    model = Arch5BFusion(config)
-    
-    # 학습
-    model.train()
-    detections = model(lr_image)
-    loss_dict = model.compute_loss(detections, targets, lr_image)
-    
-    # 추론
-    model.eval()
-    results = model.inference(lr_image)
     """
     
     def __init__(self, config: Any):
@@ -123,7 +93,6 @@ class Arch5BFusion(BasePipeline):
         # Config 추출
         model_config = getattr(config, 'model', config.get('model', {}))
         data_config = getattr(config, 'data', config.get('data', {}))
-        training_config = getattr(config, 'training', config.get('training', {}))
         
         # RFDN 설정
         rfdn_config = getattr(model_config, 'rfdn', model_config.get('rfdn', {}))
@@ -190,9 +159,17 @@ class Arch5BFusion(BasePipeline):
         )
         
         # =====================================================================
-        # Loss 함수 (Lazy initialization)
+        # Loss 함수 (CombinedLoss Module)
         # =====================================================================
-        self._combined_loss = None
+        self.loss_fn = CombinedLoss(
+            yolo_model = self.detector.detection_model,
+            sr_weight = self._sr_weight,
+            det_weight=self._det_weight,
+            phase_schedule=True
+        )
+
+        self.det_loss_fn = DetectionLoss(self.detector.detection_model)
+
         
         # =====================================================================
         # 모델 정보 출력
@@ -275,7 +252,7 @@ class Arch5BFusion(BasePipeline):
                 'fused_features': fused_features
             }
         
-        return detections
+        return detections, None
     
     # =========================================================================
     # Loss Computation
@@ -321,13 +298,20 @@ class Arch5BFusion(BasePipeline):
             detections = outputs
             features = None
         
-        device = targets.device if targets is not None and len(targets) > 0 else self.device
-        
+        device = targets.device
+        if targets is not None and len(targets) > 0:
+            device = targets.device
+               
         # =====================================================================
         # Detection Loss
         # =====================================================================
-        det_loss = torch.tensor(0.0, device=device, requires_grad=True)
-        det_loss_dict = {}
+        det_loss_dict = {
+            'total': torch.tensor(0.0, device=device),
+            'box_loss': torch.tensor(0.0, device=device),
+            'cls_loss': torch.tensor(0.0, device=device),
+            'dfl_loss': torch.tensor(0.0, device=device)
+        }
+
         
         if targets is not None and len(targets) > 0 and lr_image is not None:
             # 학습 모드에서 다시 forward하여 loss 계산
@@ -335,21 +319,13 @@ class Arch5BFusion(BasePipeline):
             
             self.detector.train()
             
-            # Full forward로 raw predictions 얻기
-            _, yolo_features = self.forward(lr_image, return_features=True)
-            
-            # YOLO detection model을 training mode로 forward
-            # fused features로 Detect head 호출
-            fused_list = [
-                yolo_features['fused_features']['p3'],
-                yolo_features['fused_features']['p4'],
-                yolo_features['fused_features']['p5']
-            ]
+            preds = self.detector(lr_image)
             
             # Detection loss를 위해 전체 model forward 필요
             # detector.compute_loss는 images를 받아서 내부에서 forward함
-            det_loss_dict = self.detector.compute_loss(lr_image, targets)
-            det_loss = det_loss_dict['total']
+            det_loss_dict = self.det_loss_fn(preds, targets, lr_image)
+
+        det_loss = det_loss_dict['total']
         
         # =====================================================================
         # SR Loss (선택적 - Phase 1에서 SR 안정화용)
@@ -409,23 +385,12 @@ class Arch5BFusion(BasePipeline):
         """
         self.eval()
         
-        # Forward
-        if return_features:
-            detections, features = self.forward(lr_image, return_features=True)
-        else:
-            detections = self.forward(lr_image)
-            features = None
-        
-        # Post-processing (NMS는 YOLO predict에서 처리)
-        # 여기서는 raw detections 반환
-        results = {
+        detections, features = self.forward(lr_image, return_features=True)
+
+        return {
             'detections': detections,
+            'features': features
         }
-        
-        if features is not None:
-            results['features'] = features
-        
-        return results
     
     # =========================================================================
     # Phase별 Freeze/Unfreeze
@@ -452,7 +417,7 @@ class Arch5BFusion(BasePipeline):
         print(f"  - YOLO frozen: {self.detector.count_parameters()['frozen']:,}")
         print(f"  - Fusion trainable: {sum(p.numel() for p in self.fusion.parameters() if p.requires_grad):,}")
     
-    def unfreeze_for_phase3(self, sr_lr_scale: float = 0.1, yolo_lr_scale: float = 0.1) -> Dict[str, List]:
+    def unfreeze_for_phase3(self) -> Dict[str, List]:
         """
         Phase 3: 전체 fine-tune (다른 LR 사용)
         
@@ -471,50 +436,25 @@ class Arch5BFusion(BasePipeline):
         print("[Arch5B] Phase 3: Full fine-tuning")
         
         # 다른 LR을 위한 파라미터 그룹
-        param_groups = [
-            {'params': self.sr_model.parameters(), 'lr_scale': sr_lr_scale, 'name': 'sr'},
-            {'params': self.detector.detection_model.parameters(), 'lr_scale': yolo_lr_scale, 'name': 'yolo'},
-            {'params': self.fusion.parameters(), 'lr_scale': 1.0, 'name': 'fusion'},
-        ]
-        
-        return param_groups
+        return {
+            'sr' : list(self.sr_model.parameters()),
+            'detector': list(self.detector.detection_model.parameters()),
+            'fusion': list(self.fusion.parameters())
+        }
     
-    # =========================================================================
-    # Architecture Info
-    # =========================================================================
-    
-    def get_architecture_info(self) -> Dict[str, Any]:
-        """아키텍처 정보 반환"""
+    def get_architecture_info(self)-> Dict[str, Any]:
+        """Architecuture information"""
         info = super().get_architecture_info()
         info.update({
             'architecture': 'Arch5B_FeatureFusion',
-            'description': 'LR → SR_Features + YOLO_Features → Attention_Fusion → Detection',
-            'rfdn_config': {
-                'nf': self.nf,
-                'num_modules': self.num_modules,
-                'feature_channels': self.sr_feature_channels
-            },
-            'yolo_config': {
-                'weights': self.yolo_weights,
-                'num_classes': self.num_classes,
-                'feature_channels': self.detector.get_feature_channels()
-            },
-            'fusion_config': {
-                'use_cross_attention': self.use_cross_attention,
-                'use_cbam': self.use_cbam,
-                'num_heads': self.num_heads
+            'components': {
+                'sr_model': 'RFDN',
+                'detector': 'YOLO',
+                'fusion': 'MultiScaleAttentionFusion',
+                'loss': 'CombinedLoss'
             }
         })
         return info
-
-
-# =============================================================================
-# Factory Function
-# =============================================================================
-
-def create_arch5b_pipeline(config: Any) -> Arch5BFusion:
-    """Arch5B 파이프라인 생성 팩토리 함수"""
-    return Arch5BFusion(config)
 
 
 # =============================================================================
@@ -523,7 +463,7 @@ def create_arch5b_pipeline(config: Any) -> Arch5BFusion:
 
 if __name__ == "__main__":
     print("=" * 70)
-    print("Arch5BFusion 테스트")
+    print("Arch5BFusion 테스트 (SRP 적용)")
     print("=" * 70)
     
     from types import SimpleNamespace
@@ -531,76 +471,69 @@ if __name__ == "__main__":
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
     print(f"Device: {device}")
     
-    # Config 생성
+    # Config
     config = SimpleNamespace(
         model=SimpleNamespace(
             rfdn=SimpleNamespace(nf=50, num_modules=4),
             yolo=SimpleNamespace(weights_path="yolov8n.pt", num_classes=80),
             fusion=SimpleNamespace(use_cross_attention=True, use_cbam=True, num_heads=4)
         ),
-        data=SimpleNamespace(upscale_factor=4, lr_size=192),
-        training=SimpleNamespace(
-            sr_weight=0.3,
-            det_weight=0.7,
-            phase_schedule=True
-        ),
+        data=SimpleNamespace(upscale_factor=4),
+        training=SimpleNamespace(sr_weight=0.3, det_weight=0.7),
         device=device
     )
     
-    # 모델 생성
-    print("\n" + "=" * 70)
-    print("1. 모델 생성")
-    print("=" * 70)
-    
     try:
+        # 1. 모델 생성
+        print("\n[1. 모델 생성]")
         model = Arch5BFusion(config)
-        print("\n✓ Arch5BFusion 생성 성공!")
-    except Exception as e:
-        print(f"모델 생성 실패: {e}")
-        exit(1)
-    
-    # Forward 테스트
-    print("\n" + "=" * 70)
-    print("2. Forward 테스트")
-    print("=" * 70)
-    
-    batch_size = 2
-    lr_image = torch.randn(batch_size, 3, 640, 640, device=device)
-    
-    model.eval()
-    with torch.no_grad():
+        print("✓ Arch5BFusion 생성 성공")
+        
+        # 2. Forward
+        print("\n[2. Forward 테스트]")
+        lr_image = torch.randn(2, 3, 640, 640, device=device)
+        
+        model.eval()
+        with torch.no_grad():
+            detections, features = model(lr_image, return_features=True)
+        
+        print(f"  SR features: {features['sr_features'].shape}")
+        print(f"  Fused features: {list(features['fused_features'].keys())}")
+        
+        # 3. Loss
+        print("\n[3. Loss 테스트]")
+        targets = torch.tensor([
+            [0, 0, 0.5, 0.5, 0.2, 0.2],
+            [1, 0, 0.3, 0.7, 0.15, 0.25],
+        ], device=device)
+        
+        model.train()
         detections, features = model(lr_image, return_features=True)
-    
-    print(f"\n입력 LR shape: {lr_image.shape}")
-    print(f"SR features shape: {features['sr_features'].shape}")
-    print("YOLO features:")
-    for k, v in features['yolo_features'].items():
-        print(f"  {k}: {v.shape}")
-    print("Fused features:")
-    for k, v in features['fused_features'].items():
-        print(f"  {k}: {v.shape}")
-    print(f"Detections type: {type(detections)}")
-    
-    # Phase 테스트
-    print("\n" + "=" * 70)
-    print("3. Phase 테스트")
-    print("=" * 70)
-    
-    model.freeze_for_phase2()
-    
-    trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
-    total = sum(p.numel() for p in model.parameters())
-    print(f"\nPhase 2: Trainable {trainable:,} / Total {total:,}")
-    
-    # 아키텍처 정보
-    print("\n" + "=" * 70)
-    print("4. 아키텍처 정보")
-    print("=" * 70)
-    
-    info = model.get_architecture_info()
-    for key, value in info.items():
-        print(f"  {key}: {value}")
-    
-    print("\n" + "=" * 70)
-    print("✓ Arch5BFusion 테스트 완료!")
-    print("=" * 70)
+        
+        loss_dict = model.compute_loss(
+            outputs=(detections, features),
+            targets=targets,
+            lr_image=lr_image
+        )
+        
+        print("  Loss 결과:")
+        for k, v in loss_dict.items():
+            if isinstance(v, torch.Tensor):
+                print(f"    {k}: {v.item():.6f}")
+        
+        # 4. Phase 테스트
+        print("\n[4. Phase 테스트]")
+        model.freeze_for_phase2()
+        
+        trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
+        total = sum(p.numel() for p in model.parameters())
+        print(f"  Phase 2: {trainable:,} / {total:,} trainable")
+        
+        print("\n" + "=" * 70)
+        print("✓ Arch5BFusion 테스트 완료!")
+        print("=" * 70)
+        
+    except Exception as e:
+        print(f"테스트 실패: {e}")
+        import traceback
+        traceback.print_exc()
