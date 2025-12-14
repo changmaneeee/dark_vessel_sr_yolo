@@ -6,9 +6,9 @@ Baseline architecture for comparison.
 
 import torch
 import torch.nn as nn
-from src.models.pipelines.base_pipeline import BasePipeline
-from src.models.sr_models.rfdn import RFDN
-from src.models.detectors.yolo_wrapper import YOLOWrapper
+from base_pipeline import BasePipeline
+from ..sr_models.rfdn import RFDN
+from ..detectors.yolo_wrapper import YOLOWrapper
 
 class Arch0Sequential(BasePipeline):
     """

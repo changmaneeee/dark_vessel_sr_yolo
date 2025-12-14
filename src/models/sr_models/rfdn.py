@@ -16,7 +16,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from typing import Dict, Any
 
-from src.models.sr_models.base_sr import BaseSRModel
+from base_sr import BaseSRModel
 
 
 # =============================================================================
@@ -115,7 +115,7 @@ class RFDB(nn.Module):
         super(RFDB, self).__init__()
 
         self.dc = self.distilled_channels = int(in_channels * distillation_rate)  # 12
-        self.rc = self.remaining_channels = in_channels - self.dc  # 38
+        self.rc = self.remaining_channels = in_channels # 50
         
         # Stage 1
         self.c1_d = conv_layer(in_channels, self.dc, kernel_size=1)  # 50→12 
@@ -293,7 +293,7 @@ if __name__ == "__main__":
     # 모델 생성
     model = RFDN(nf=50, num_modules=4, upscale=4)
     print(f"\n모델 정보:")
-    print(f"  - 파라미터 수: {model.count_parameters()}")
+    #print(f"  - 파라미터 수: {model.count_parameters()}")
     print(f"  - Feature 정보: {model.get_feature_info()}")
     
     # 더미 입력 생성
