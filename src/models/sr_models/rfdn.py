@@ -16,7 +16,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from typing import Dict, Any
 
-from base_sr import BaseSRModel
+from .base_sr import BaseSRModel
 
 
 # =============================================================================

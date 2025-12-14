@@ -70,7 +70,7 @@ from typing import Dict, Any, Optional, Tuple, List
 from src.models.pipelines.base_pipeline import BasePipeline
 from src.models.sr_models.rfdn import RFDN
 from src.models.detectors.yolo_wrapper import YOLOWrapper
-from src.models.gates.soft_gate import LightweightGate, SoftGateMoudle
+from src.models.gates.soft_gate import LightweightGate #v2와 다른 버전도 추후 추가 예정
 from src.losses.detection_loss import DetectionLoss
 from src.losses.sr_loss import SRLoss
 

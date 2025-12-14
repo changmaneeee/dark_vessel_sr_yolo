@@ -24,7 +24,7 @@ model = get_pipeline('arch5b', config)  # Fusion
 """
 
 from src.models.pipelines.base_pipeline import BasePipeline
-from src.models.pipelines.arch0_sequential import Arch0Sequential, create_arch0_pipeline
+from src.models.pipelines.arch0_sequential import Arch0Sequential
 from src.models.pipelines.arch2_softgate import Arch2SoftGate
 from src.models.pipelines.arch4_adaptive import Arch4Adaptive
 from src.models.pipelines.arch5b_fusion import Arch5BFusion
