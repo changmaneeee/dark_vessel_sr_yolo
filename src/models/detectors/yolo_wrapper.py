@@ -470,8 +470,9 @@ class YOLOWrapper(nn.Module):
     
     def train(self, mode: bool = True):
         """학습 모드 설정 (override)"""
-        super().train(mode)
-        self.detection_model.train(mode)
+        self.training = mode
+        if hasattr(self, 'yolo') and hasattr(self.yolo, 'model'):
+            nn.Module.train(self.yolo.model, mode)
         return self
     
     def eval(self):
@@ -493,7 +494,7 @@ if __name__ == "__main__":
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
     print(f"Device: {device}")
     
-    try:
+    try: 
         wrapper = YOLOWrapper("yolov8n.pt", device=device)
         print(f"\n모델 정보: {wrapper.get_model_info()}")
         

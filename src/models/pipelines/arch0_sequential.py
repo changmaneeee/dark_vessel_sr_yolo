@@ -81,7 +81,7 @@ from typing import Dict, Any, Optional, Tuple
 from src.models.pipelines.base_pipeline import BasePipeline
 from src.models.sr_models.rfdn import RFDN
 from src.models.detectors.yolo_wrapper import YOLOWrapper
-
+from src.losses.detection_loss import DetectionLoss
 
 class Arch0Sequential(BasePipeline):
     """
@@ -224,7 +224,8 @@ class Arch0Sequential(BasePipeline):
             device=self.device,
             verbose=False
         )
-        
+        self.detection_loss_fn = DetectionLoss(self.detector.detection_model)
+
         # =====================================================================
         # 4. Detector Freeze (옵션)
         # =====================================================================
@@ -395,7 +396,11 @@ class Arch0Sequential(BasePipeline):
         else:
             # HR GT 없으면 SR Loss = 0
             sr_loss = torch.tensor(0.0, device=sr_image.device)
-        
+
+
+        self.detector.detection_model.model.train()
+        preds = self.detector.detection_model.model(sr_image)
+    
         # =====================================================================
         # Detection Loss 계산
         # =====================================================================
@@ -408,7 +413,7 @@ class Arch0Sequential(BasePipeline):
         # loss 값은 계산되어 모니터링 가능
         # =====================================================================
         
-        det_loss_dict = self.detector.compute_loss(sr_image, targets)
+        det_loss_dict = self.detection_loss_fn(preds, targets, sr_image)
         det_loss = det_loss_dict['total']
         
         # =====================================================================
@@ -596,14 +601,18 @@ if __name__ == "__main__":
     
     # 더미 targets (실제로는 YOLO 형식 필요)
     targets = torch.zeros(1, 6)  # [batch_idx, class, x, y, w, h]
-    
+    '''
     loss_dict = model.compute_loss((sr_image, detections), targets, hr_gt)
     
     print(f"\nLoss 결과:")
     for name, value in loss_dict.items():
         if isinstance(value, torch.Tensor):
             print(f"  {name}: {value.item():.6f}")
-    
+    '''
+    print(f"\n[SR Loss 테스트]")
+    sr_loss = F.l1_loss(sr_image, hr_gt)
+    print(f"  sr_loss: {sr_loss.item():.6f}")
+    '''
     # =========================================================================
     # 5. 아키텍처 정보
     # =========================================================================
@@ -616,3 +625,4 @@ if __name__ == "__main__":
         print(f"  {key}: {value}")
     
     print("\n✓ Arch0Sequential 테스트 완료!")
+    '''
