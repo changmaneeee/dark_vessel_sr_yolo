@@ -80,7 +80,7 @@ class Arch4Adaptive(BasePipeline):
 
         self.final_conf_threshold = getattr(data_config, 'final_conf_threshold', data_config.get('final_conf_threshold', 0.25))
 
-        self.upslcale_factor = getattr(data_config, 'upscale_factor', data_config.get('upscale_factor', 4))
+        self.upscale_factor = getattr(data_config, 'upscale_factor', data_config.get('upscale_factor', 4))
 
 
         #==========================================================================================
@@ -93,7 +93,7 @@ class Arch4Adaptive(BasePipeline):
             out_channels=3, 
             nf=self.nf, 
             num_modules=self.num_modules,   
-            upscale_factor=self.upslcale_factor
+            upscale_factor=self.upscale_factor
         )
 
         #==========================================================================================
