@@ -21,8 +21,8 @@ class BasePipeline(ABC, nn.Module):
         self.detector: Optional[nn.Module] = None
 
         training_config = getattr(config, 'training', {})
-        self._sr_weight: getattr(training_config, 'sr_weight', 0.5)
-        self._det_weight: getattr(training_config, 'det_weight', 0.5)
+        self._sr_weight= getattr(training_config, 'sr_weight', 0.5)
+        self._det_weight= getattr(training_config, 'det_weight', 0.5)
 
     @abstractmethod
     def forward(self, lr_image: torch.Tensor) -> Tuple[torch.Tensor, Any]:

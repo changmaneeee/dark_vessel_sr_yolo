@@ -88,23 +88,29 @@ class Arch2SoftGate(BasePipeline):
         """
         super().__init__(config)
         
-        model_config = getattr(config, 'model', config.get('model', {}))
-        data_config = getattr(config, 'data', config.get('data',{}))
+        def get_val(obj, key, default=None):
+            if hasattr(obj, key):
+                return getattr(obj, key)
+            elif isinstance(obj, dict):
+                return obj.get(key, default)
+            return default
 
-        rfdn_config = getattr(model_config, 'yolo', model_config.get('rfdn', {}))
-        self.nf = getattr(rfdn_config, 'nf', rfdn_config.get('nf', 50))
-        self.num_modules = getattr(rfdn_config, 'num_modules', rfdn_config.get('num_modules',4))
+        model_config = get_val(config, 'model', config)
+        data_config = get_val(config, 'data', SimpleNamespace())
+        rfdn_config = get_val(model_config, 'rfdn', SimpleNamespace())
+        self.nf = get_val(rfdn_config, 'nf', 50)
+        self.num_modules = get_val(rfdn_config, 'num_modules', 4)
+        yolo_config = get_val(model_config, 'yolo', SimpleNamespace())
 
-        yolo_config = getattr(model_config, 'yolo', model_config.get('yolo', {}))
-        self.yolo_weights = getattr(yolo_config, 'weights_path', yolo_config.get('weights_path','yolo11s.pt'))
-        self.num_classes = getattr(yolo_config, 'num_classes', yolo_config.get('num_classes', 1))
+        yolo_config = get_val(model_config, 'yolo', SimpleNamespace())
+        self.yolo_weights = get_val(yolo_config, 'weights_path', 'yolov8n.pt')
+        self.num_classes = get_val(yolo_config, 'num_classes', 1)
 
-        gate_config = getattr(model_config, 'gate', model_config.get('gate', {}))
-        self.gate_basechannels = getattr(gate_config, 'base_channels', gate_config.get('base_channels',32))
-        self.gate_num_layers = getattr(gate_config, 'num_layers', gate_config.get('num_layers', 4))
+        gate_config = get_val(model_config, 'gate', SimpleNamespace())
+        self.gate_basechannels = get_val(gate_config, 'base_channels', 32)
+        self.gate_num_layers = get_val(gate_config, 'num_layers', 4)
 
-        self.upscale_factor = getattr(data_config, 'upscale_factor', data_config.get('upscale_factor', 4))
-
+        self.upscale_factor = get_val(data_config, 'upscale_factor', 4)
         self.gate_network = LightweightGate(
             in_channels=3,
             base_channels=self.gate_basechannels,   
@@ -126,7 +132,7 @@ class Arch2SoftGate(BasePipeline):
             verbose=False
         )
 
-        self.det_loss_fn = DetectionLoss(self.detector.yolo_model)
+        self.det_loss_fn = DetectionLoss(self.detector.detection_model)
         self.sr_loss_fn = SRLoss(l1_weight=1.0, use_charbonnier=True)
 
         self.register_buffer('gate_running_mean', torch.tensor(0.5))
@@ -316,7 +322,7 @@ class Arch2SoftGate(BasePipeline):
         """
         self.eval()
         
-        result = self.forward(lr_image, return_intermediate=True)
+        result = self.forward(lr_image, return_intermediates=True)
         
         # SR 적용 비율 계산
         sr_applied = (result['gate'] > 0.5).float().mean().item()
@@ -560,6 +566,7 @@ if __name__ == "__main__":
         # 1. 모델 생성
         print("\n[1. 모델 생성]")
         model = Arch2SoftGate(config)
+        model.to(device)
         print("✓ Arch2SoftGate 생성 성공")
         
         # 2. Forward
@@ -568,7 +575,7 @@ if __name__ == "__main__":
         
         model.eval()
         with torch.no_grad():
-            result = model(lr_image, return_intermediate=True)
+            result = model(lr_image, return_intermediates=True)
         
         print(f"  LR input: {lr_image.shape}")
         print(f"  HR output: {result['hr_image'].shape}")
@@ -597,7 +604,7 @@ if __name__ == "__main__":
         ], device=device)
         
         model.train()
-        result = model(lr_image, return_intermediate=True)
+        result = model(lr_image, return_intermediates=True)
         loss_dict = model.compute_loss(result, targets)
         
         print("  Loss 결과:")
@@ -628,7 +635,7 @@ if __name__ == "__main__":
         
         print(f"  Gate trainable: {gate_trainable:,}")
         print(f"  SR trainable: {sr_trainable:,}")
-        
+        '''
         # 7. 아키텍처 정보
         print("\n[7. 아키텍처 정보]")
         info = model.get_architecture_info()
@@ -636,8 +643,9 @@ if __name__ == "__main__":
         print(f"  Components: {info['components']}")
         
         print("\n" + "=" * 70)
+        '''
         print("✓ Arch2 SoftGate 테스트 완료!")
-        print("=" * 70)
+        #print("=" * 70)
         
     except Exception as e:
         print(f"테스트 실패: {e}")

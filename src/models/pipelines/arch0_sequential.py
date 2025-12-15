@@ -602,7 +602,7 @@ if __name__ == "__main__":
     # 더미 targets (실제로는 YOLO 형식 필요)
     targets = torch.zeros(1, 6)  # [batch_idx, class, x, y, w, h]
     '''
-    loss_dict = model.compute_loss((sr_image, detections), targets, hr_gt)
+    loss_dict = model.compute_loss((sr_image, detections), targets, hr_gt) ===================>>>>>> 실제 추론 혹은 학습시에는 주석 제거(data set 연결 안해서 테스트를 위해 주석처리함)
     
     print(f"\nLoss 결과:")
     for name, value in loss_dict.items():
