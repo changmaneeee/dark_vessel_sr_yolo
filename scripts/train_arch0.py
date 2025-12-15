@@ -25,7 +25,7 @@ import cv2
 import numpy as np
 from datetime import datetime
 from types import SimpleNamespace
-
+import torch.nn.functional as F
 import sys
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
@@ -151,7 +151,7 @@ def train_one_epoch(model, dataloader, optimizer, device, epoch, sr_weight, det_
         sr_imgs, detections = model(lr_imgs)
         
         # Loss (SR만 계산, Detection은 더미)
-        import torch.nn.functional as F
+        
         sr_loss = F.l1_loss(sr_imgs, hr_gts)
         
         # TODO: Detection loss 추가 (실제 데이터 필요)
