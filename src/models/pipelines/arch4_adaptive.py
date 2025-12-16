@@ -32,7 +32,7 @@ Pass 1: LR → YOLO → 결과 분석
          낮은 conf 있음      낮은 conf 없음
               │                   │
               ▼                   │
-Pass 2: LR → SR → HR → YOLO      │
+Pass 2: LR → SR → HR → YOLO       │
               │                   │
               ▼                   ▼
          결과 병합 (NMS)    1차 결과 그대로
