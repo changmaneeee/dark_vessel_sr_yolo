@@ -54,6 +54,8 @@ from src.models.sr_models.rfdn import RFDN
 from src.models.detectors.yolo_wrapper import YOLOWrapper
 from src.losses.detection_loss import DetectionLoss
 from src.losses.sr_loss import SRLoss
+from types import SimpleNamespace
+
 
 class Arch4Adaptive(BasePipeline):
 
@@ -93,7 +95,7 @@ class Arch4Adaptive(BasePipeline):
             out_channels=3, 
             nf=self.nf, 
             num_modules=self.num_modules,   
-            upscale_factor=self.upscale_factor
+            upscale=self.upscale_factor
         )
 
         #==========================================================================================
@@ -113,7 +115,7 @@ class Arch4Adaptive(BasePipeline):
         #==========================================================================================
 
         self.det_loss_fn = DetectionLoss(self.detector.detection_model)
-        self.sr_loss_fn = SRLoss(l1_weight=1.0, use_charbonnier=False)
+        self.sr_loss_fn = SRLoss(l1_weight=1.0, charbonnier=False)
 
         self.register_buffer('pass2_trigger_count', torch.tensor(0))
         self.register_buffer('total_inference_count', torch.tensor(0))
