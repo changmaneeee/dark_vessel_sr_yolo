@@ -5,11 +5,5 @@ Feature fusion mechanisms for SR-Detection integration:
 - GateNetwork: Gating mechanism for feature selection
 """
 
-# TODO: Uncomment when implemented
-# from src.models.fusion.attention_fusion import AttentionFusion
-# from src.models.fusion.gate_network import GateNetwork
-
-__all__ = [
-    # "AttentionFusion",
-    # "GateNetwork",
-]
+from src.models.fusion.attention_fusion import MultiScaleAttentionFusion, SingleScaleFusion
+__all__ = ["MultiScaleAttentionFusion", "SingleScaleFusion"]
