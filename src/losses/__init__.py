@@ -1,19 +1,18 @@
-"""Losses Module
-
-Loss functions for SR and detection:
-- SR Loss: Reconstruction losses (L1, Charbonnier, Perceptual)
-- Detection Loss: YOLO detection losses
-- Combined Loss: Weighted combination of SR and detection losses
+"""
+=============================================================================
+losses/__init__.py - Loss 모듈 패키지
+=============================================================================
 """
 
-# TODO: Uncomment when implemented
-# from src.losses.sr_loss import CharbonnierLoss, PerceptualLoss
-# from src.losses.detection_loss import YOLOLoss
-# from src.losses.combined_loss import CombinedLoss
+from .sr_loss import SRLoss, L1Loss, CharbonnierLoss, SSIMLoss
+from .detection_loss import DetectionLoss
+from .combined_loss import CombinedLoss
 
 __all__ = [
-    # "CharbonnierLoss",
-    # "PerceptualLoss",
-    # "YOLOLoss",
-    # "CombinedLoss",
+    'SRLoss',
+    'L1Loss', 
+    'CharbonnierLoss',
+    'SSIMLoss',
+    'DetectionLoss',
+    'CombinedLoss'
 ]
