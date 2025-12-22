@@ -1,9 +1,12 @@
+'''
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import math
 from typing import Optional, Tuple
 from einops import rearrange, repeat
+
+
 
 class LayerNorm2d(nn.Module):
     def __init__(self, dim):
@@ -258,3 +261,101 @@ if __name__ == "__main__":
             
     except Exception as e:
         print(f"❌ 에러 발생: {e}")
+
+'''
+
+
+import torch
+import torch.nn as nn
+# 방금 우리가 수술한 파일에서 클래스를 가져옵니다.
+from .mamba_archs.mambairv2light_arch import MambaIRv2Light 
+
+class MambaIRDetector(nn.Module):
+    """
+    Arch 5-B용 Wrapper Class
+    역할: MambaIRv2Light 모델을 생성하고, Arch 5-B에 맞는 입출력을 제공
+    """
+    def __init__(
+        self, 
+        upscale=4,
+        img_size=64,
+        embed_dim=48,
+        d_state=8,
+        depths=[5, 5, 5, 5],
+        num_heads=[4, 4, 4, 4],
+        window_size=16,
+        **kwargs # Config에서 넘어오는 기타 잡동사니 인자 무시
+    ):
+        super().__init__()
+        
+        # MambaIRv2Light 모델 생성 (수술한 파일 사용)
+        self.model = MambaIRv2Light(
+            upscale=upscale,
+            img_size=img_size,
+            embed_dim=embed_dim,
+            d_state=d_state,
+            depths=depths,
+            num_heads=num_heads,
+            window_size=window_size,
+            inner_rank=32,          # 논문 기본값 고정
+            num_tokens=64,          # 논문 기본값 고정
+            convffn_kernel_size=5,  # 논문 기본값 고정
+            mlp_ratio=1.0,          # 논문 기본값 고정
+            upsampler='pixelshuffledirect',
+            resi_connection='1conv'
+        )
+        self.window_size = window_size
+
+    def load_pretrained_weights(self, path):
+        if not path:
+            return
+        print(f"[MambaIR] 가중치 로드 중: {path}")
+        checkpoint = torch.load(path, map_location='cpu')
+        
+        # BasicSR 저장 방식 처리 (params_ema > params > dict)
+        if 'params_ema' in checkpoint:
+            state_dict = checkpoint['params_ema']
+        elif 'params' in checkpoint:
+            state_dict = checkpoint['params']
+        else:
+            state_dict = checkpoint
+            
+        # 키 이름 정리 ('net_g.' 제거)
+        new_state_dict = {}
+        for k, v in state_dict.items():
+            if k.startswith('net_g.'):
+                new_state_dict[k[6:]] = v
+            else:
+                new_state_dict[k] = v
+                
+        self.model.load_state_dict(new_state_dict, strict=True)
+        print("[MambaIR] ✓ 가중치 로드 완료")
+
+    def forward_features(self, x):
+        """
+        [핵심] Arch 5-B용 Feature Extraction
+        패딩 -> Feature 추출 -> 언패딩 과정을 캡슐화
+        """
+        # 1. Padding (Window Size 배수 맞추기)
+        h_ori, w_ori = x.size()[-2], x.size()[-1]
+        mod = self.window_size
+        h_pad = (mod - h_ori % mod) % mod
+        w_pad = (mod - w_ori % mod) % mod
+        
+        x_pad = torch.cat([x, torch.flip(x, [2])], 2)[:, :, :h_ori + h_pad, :]
+        x_pad = torch.cat([x_pad, torch.flip(x_pad, [3])], 3)[:, :, :, :w_ori + w_pad]
+
+        # 2. 마스크 생성 (모델 내부 함수 사용)
+        attn_mask = self.model.calculate_mask([x_pad.shape[2], x_pad.shape[3]]).to(x.device)
+        params = {'attn_mask': attn_mask, 'rpi_sa': self.model.relative_position_index_SA}
+        
+        # 3. Feature 추출
+        feat = self.model.forward_features(x_pad, params)
+        
+        # 4. Unpadding
+        feat = feat[..., :h_ori, :w_ori]
+        
+        return feat
+
+    def forward(self, x):
+        return self.model(x)

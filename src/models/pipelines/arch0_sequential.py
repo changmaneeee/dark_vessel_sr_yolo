@@ -82,6 +82,7 @@ from src.models.pipelines.base_pipeline import BasePipeline
 from src.models.sr_models.rfdn import RFDN
 from src.models.detectors.yolo_wrapper import YOLOWrapper
 from src.losses.detection_loss import DetectionLoss
+from types import SimpleNamespace
 
 class Arch0Sequential(BasePipeline):
     """
