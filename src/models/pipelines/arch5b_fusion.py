@@ -64,6 +64,7 @@ from src.models.detectors.yolo_wrapper import YOLOWrapper
 from src.models.fusion.attention_fusion import MultiScaleAttentionFusion
 from src.losses.combined_loss import CombinedLoss
 from src.losses.detection_loss import DetectionLoss
+from src.models.sr_models.mamba_sr import MambaIRDetector
 
 
 class Arch5BFusion(BasePipeline):
@@ -114,20 +115,38 @@ class Arch5BFusion(BasePipeline):
         self.upscale_factor = getattr(data_config, 'upscale_factor', data_config.get('upscale_factor', 4))
         
         # =====================================================================
-        # SR 모델 (RFDN) 생성
+        # SR 모델 (RFDN or Mamba) 생성
         # =====================================================================
-        print(f"\n[Arch5B] Initializing RFDN...")
-        
-        self.sr_model = RFDN(
-            in_channels=3,
-            out_channels=3,
-            nf=self.nf,
-            num_modules=self.num_modules,
-            upscale=self.upscale_factor
-        )
-        
-        # SR feature 채널 수
-        self.sr_feature_channels = self.nf  # 50
+        sr_type = getattr(model_config, 'sr_type', 'rfdn').lower()
+        print(f"\n[Arch5B] 선택된 SR 모델: {sr_type.upper()}")
+
+        if sr_type == 'mamba':
+            # --- Mamba 사용 시 ---
+            mamba_cfg = getattr(model_config, 'mamba', {})
+            self.sr_model = MambaIRDetector(
+                upscale=getattr(config.data, 'upscale_factor', 4),
+                img_size=getattr(mamba_cfg, 'img_size', 64),
+                embed_dim=getattr(mamba_cfg, 'embed_dim', 48),
+                d_state=getattr(mamba_cfg, 'd_state', 8),
+                depths=getattr(mamba_cfg, 'depths', [5, 5, 5, 5]),
+                window_size=getattr(mamba_cfg, 'window_size', 16)
+            )
+            # 가중치 로드
+            if hasattr(mamba_cfg, 'pretrain_path'):
+                self.sr_model.load_pretrained_weights(mamba_cfg.pretrain_path)
+
+            # Fusion에 넘겨줄 채널 수 정보
+            self.sr_feature_channels = getattr(mamba_cfg, 'embed_dim', 48)
+
+        else:
+            # --- 기존 RFDN 사용 시 ---
+            self.sr_model = RFDN(
+                nf=self.nf,
+                num_modules=4,
+                upscale=self.upscale_factor
+            )
+            # RFDN 가중치 로드 로직... (기존 코드 유지)
+            self.sr_feature_channels = self.nf
         
         # =====================================================================
         # YOLO Detector 생성

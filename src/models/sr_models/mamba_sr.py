@@ -267,13 +267,13 @@ if __name__ == "__main__":
 
 import torch
 import torch.nn as nn
-# 방금 우리가 수술한 파일에서 클래스를 가져옵니다.
+# 우리가 가져온(수술한) 파일에서 모델을 꺼내옵니다.
 from .mamba_archs.mambairv2light_arch import MambaIRv2Light 
 
 class MambaIRDetector(nn.Module):
     """
-    Arch 5-B용 Wrapper Class
-    역할: MambaIRv2Light 모델을 생성하고, Arch 5-B에 맞는 입출력을 제공
+    [역할]
+    MambaIR 모델을 Arch 5-B 시스템에 맞게 변환해주는 어댑터입니다.
     """
     def __init__(
         self, 
@@ -284,11 +284,11 @@ class MambaIRDetector(nn.Module):
         depths=[5, 5, 5, 5],
         num_heads=[4, 4, 4, 4],
         window_size=16,
-        **kwargs # Config에서 넘어오는 기타 잡동사니 인자 무시
+        **kwargs # 그 외 잡다한 설정은 무시
     ):
         super().__init__()
         
-        # MambaIRv2Light 모델 생성 (수술한 파일 사용)
+        # 1. 실제 모델 생성 (우리가 가져온 파일 사용)
         self.model = MambaIRv2Light(
             upscale=upscale,
             img_size=img_size,
@@ -297,22 +297,25 @@ class MambaIRDetector(nn.Module):
             depths=depths,
             num_heads=num_heads,
             window_size=window_size,
-            inner_rank=32,          # 논문 기본값 고정
-            num_tokens=64,          # 논문 기본값 고정
-            convffn_kernel_size=5,  # 논문 기본값 고정
-            mlp_ratio=1.0,          # 논문 기본값 고정
+            inner_rank=32,          # 논문 고정값
+            num_tokens=64,          # 논문 고정값
+            convffn_kernel_size=5,  # 논문 고정값
+            mlp_ratio=1.0,          # 논문 고정값
             upsampler='pixelshuffledirect',
             resi_connection='1conv'
         )
         self.window_size = window_size
 
     def load_pretrained_weights(self, path):
+        """학습된 가중치(.pth)를 불러오는 함수"""
         if not path:
+            print("[MambaIR] ⚠️ 가중치 경로가 없습니다. 랜덤 초기화됩니다.")
             return
-        print(f"[MambaIR] 가중치 로드 중: {path}")
+
+        print(f"[MambaIR] 가중치 로딩 중... {path}")
         checkpoint = torch.load(path, map_location='cpu')
         
-        # BasicSR 저장 방식 처리 (params_ema > params > dict)
+        # BasicSR은 가중치를 'params' 또는 'params_ema' 안에 숨겨둡니다.
         if 'params_ema' in checkpoint:
             state_dict = checkpoint['params_ema']
         elif 'params' in checkpoint:
@@ -320,42 +323,50 @@ class MambaIRDetector(nn.Module):
         else:
             state_dict = checkpoint
             
-        # 키 이름 정리 ('net_g.' 제거)
+        # 이름표 정리 ('net_g.' 같은 접두사 떼기)
         new_state_dict = {}
         for k, v in state_dict.items():
             if k.startswith('net_g.'):
                 new_state_dict[k[6:]] = v
             else:
                 new_state_dict[k] = v
-                
-        self.model.load_state_dict(new_state_dict, strict=True)
-        print("[MambaIR] ✓ 가중치 로드 완료")
+        
+        # 모델에 장착!
+        try:
+            self.model.load_state_dict(new_state_dict, strict=True)
+            print("[MambaIR] ✓ 가중치 로딩 성공!")
+        except Exception as e:
+            print(f"[MambaIR] ❌ 가중치 로딩 실패. 모델 설정(depths 등)을 확인하세요.")
+            raise e
 
     def forward_features(self, x):
         """
-        [핵심] Arch 5-B용 Feature Extraction
-        패딩 -> Feature 추출 -> 언패딩 과정을 캡슐화
+        [가장 중요한 부분]
+        Arch 5-B는 이 함수를 호출해서 Feature를 달라고 합니다.
         """
-        # 1. Padding (Window Size 배수 맞추기)
+        # Mamba는 입력 크기가 window_size(16)의 배수여야 합니다.
+        # 그래서 패딩(Padding)을 붙여줍니다.
         h_ori, w_ori = x.size()[-2], x.size()[-1]
         mod = self.window_size
         h_pad = (mod - h_ori % mod) % mod
         w_pad = (mod - w_ori % mod) % mod
         
+        # 이미지 늘리기 (Reflect Padding)
         x_pad = torch.cat([x, torch.flip(x, [2])], 2)[:, :, :h_ori + h_pad, :]
         x_pad = torch.cat([x_pad, torch.flip(x_pad, [3])], 3)[:, :, :, :w_ori + w_pad]
 
-        # 2. 마스크 생성 (모델 내부 함수 사용)
+        # 마스크 계산 (Mamba 모델 내부 기능 활용)
         attn_mask = self.model.calculate_mask([x_pad.shape[2], x_pad.shape[3]]).to(x.device)
         params = {'attn_mask': attn_mask, 'rpi_sa': self.model.relative_position_index_SA}
         
-        # 3. Feature 추출
+        # 진짜 모델 실행! (Feature 추출)
         feat = self.model.forward_features(x_pad, params)
         
-        # 4. Unpadding
+        # 아까 붙인 패딩 다시 잘라내기
         feat = feat[..., :h_ori, :w_ori]
         
         return feat
 
     def forward(self, x):
+        # 테스트용 (이미지 전체 복원)
         return self.model(x)
