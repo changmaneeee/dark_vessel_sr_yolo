@@ -78,6 +78,7 @@ from types import SimpleNamespace
 
 class Arch2SoftGate(BasePipeline):
 
+    SUPPORTED_SR_TYPES = ['rfdn', 'mamba']
 
     def __init__(self, config: Any):
         """

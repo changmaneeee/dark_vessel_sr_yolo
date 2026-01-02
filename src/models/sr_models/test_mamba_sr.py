@@ -41,21 +41,21 @@ def test_import():
     print_header("TEST 1: Import")
     
     try:
-        from models.sr_models import MambaSR, create_mamba_sr
+        from src.models.sr_models import MambaSR, create_mamba_sr
         print_result("MambaSR import", True)
     except ImportError as e:
         print_result("MambaSR import", False, str(e))
         return False
     
     try:
-        from models.sr_models import MambaIRv2Light
+        from src.models.sr_models import MambaIRv2Light
         print_result("MambaIRv2Light import", True)
     except ImportError as e:
         print_result("MambaIRv2Light import", False, str(e))
         return False
     
     try:
-        from models.sr_models.mamba_archs import to_2tuple, trunc_normal_
+        from src.models.sr_models.mamba_archs import to_2tuple, trunc_normal_
         print_result("arch_util import", True)
     except ImportError as e:
         print_result("arch_util import", False, str(e))
@@ -68,7 +68,7 @@ def test_model_creation():
     """테스트 2: 모델 생성 테스트"""
     print_header("TEST 2: Model Creation")
     
-    from models.sr_models import MambaSR, create_mamba_sr
+    from src.models.sr_models import MambaSR, create_mamba_sr
     
     # 방법 1: 직접 생성
     try:
@@ -297,7 +297,7 @@ def test_gpu_memory():
         print("  ⚠️ CUDA 사용 불가, 스킵")
         return True
     
-    from models.sr_models import create_mamba_sr
+    from src.models.sr_models import create_mamba_sr
     
     torch.cuda.empty_cache()
     torch.cuda.reset_peak_memory_stats()

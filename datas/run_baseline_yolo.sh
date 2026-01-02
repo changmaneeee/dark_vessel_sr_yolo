@@ -12,10 +12,10 @@ BASE_DIR="/home/octolab-rtx4090/Desktop/changmin/dark_vessel_sr_yolo"
 SAVE_DIR="$BASE_DIR/yolo_results"
 
 # 1. 하이퍼파라미터 설정 (Hyperparameters)
-DATA_YAML="/home/octolab-rtx4090/Desktop/changmin/airbus_data/data.yaml"
-EPOCHS=100
-IMG_SIZE=192
-BATCH_SIZE=512
+DATA_YAML="/home/octolab-rtx4090/Desktop/changmin/smart_airbus_data/hr/data.yaml"
+EPOCHS=500
+IMG_SIZE=640
+BATCH_SIZE=64
 WORKERS=8
 DEVICE=0
 
@@ -36,7 +36,7 @@ mkdir -p "$SAVE_DIR"
 for MODEL in "${MODELS[@]}"
 do
     # 모델 파일명에서 .pt 확장자 제거 (예: yolov8n.pt -> yolov8n)
-    MODEL_NAME="${MODEL%.*}"
+    MODEL_NAME="${MODEL%.*}+HR_airbus_smartdata"
     
     echo ""
     echo "--------------------------------------------------------"

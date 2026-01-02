@@ -1,17 +1,8 @@
-"""SR Models Module
-
-Super-Resolution models for satellite image enhancement:
-- BaseSRModel: Abstract base class
-- RFDN: Residual Feature Distillation Network
-- MambaSR: Mamba-based SR model
-- TTST: Texture Transformer for SR
-"""
-
 """Super-Resolution Models
 
 사용 가능한 SR 모델:
-    - RFDN: 경량 SR 모델
-    - MambaSR: MambaIRv2Light 기반 SR 모델 (Wrapper)
+    - RFDN: 경량 SR 모델 (기본)
+    - MambaSR: MambaIRv2Light 기반 SR 모델 (고성능)
 """
 
 # 기존 모델
