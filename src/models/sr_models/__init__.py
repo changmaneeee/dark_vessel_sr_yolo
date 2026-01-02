@@ -7,8 +7,28 @@ Super-Resolution models for satellite image enhancement:
 - TTST: Texture Transformer for SR
 """
 
-# 수정 필요
-from src.models.sr_models.base_sr import BaseSRModel
-from src.models.sr_models.rfdn import RFDN
-from src.models.sr_models.mamba_sr import MambaSR
-__all__ = ["BaseSRModel", "RFDN", "MambaSR"]
+"""Super-Resolution Models
+
+사용 가능한 SR 모델:
+    - RFDN: 경량 SR 모델
+    - MambaSR: MambaIRv2Light 기반 SR 모델 (Wrapper)
+"""
+
+# 기존 모델
+from .rfdn import RFDN
+
+# MambaSR 추가
+from .mamba_sr import MambaSR, create_mamba_sr
+
+# mamba_archs에서 직접 접근이 필요한 경우
+from .mamba_archs import MambaIRv2Light
+
+__all__ = [
+    # SR Models
+    'RFDN',
+    'MambaSR',
+    'create_mamba_sr',
+    
+    # Raw architectures (고급 사용자용)
+    'MambaIRv2Light',
+]
