@@ -235,7 +235,7 @@ MIT License - 자세한 내용은 [LICENSE](LICENSE) 파일 참조
 
 ## 연락처
 
-- 이메일: your.email@example.com
+- 이메일: changmin3702@kau.kr
 - 이슈: [GitHub Issues](https://github.com/yourusername/ais-sat-pipeline/issues)
 
 ---
