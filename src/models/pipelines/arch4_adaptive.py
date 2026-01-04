@@ -3,33 +3,8 @@
 arch4_adaptive.py - Architecture 4: Adaptive 2-Pass Pipeline
 =============================================================================
 
-[Arch 4 개념]
-
-"1차 탐지에서 놓친 객체가 있을 수 있다. SR 후 다시 보자!"
-
-핵심 아이디어:
-- 1차 탐지 (LR): 빠르게 탐지
-- 결과 분석: 낮은 confidence 객체 있으면 → 2차 진행
-- 2차 탐지 (SR→HR): 더 정밀하게 재탐지
-- 결과 병합: 1차 고conf + 2차 추가발견
-
-[지원 SR 모델]
-- RFDN: 경량, 빠름 (기본)
-- MambaSR: 고성능, Mamba 기반
-
-[아키텍처]
-
-Pass 1: LR → YOLO → 결과 분석
-                        │
-              ┌─────────┴─────────┐
-              │                   │
-         낮은 conf 있음      낮은 conf 없음
-              │                   │
-              ▼                   │
-Pass 2: LR → SR → HR → YOLO       │
-              │                   │
-              ▼                   ▼
-         결과 병합 (NMS)    1차 결과 그대로
+[수정 내역]
+- __init__ 끝에 self.to(self.device) 추가하여 device 불일치 해결
 """
 
 import torch
@@ -136,6 +111,11 @@ class Arch4Adaptive(BasePipeline):
         print(f"  - Total params: {total_params:,}")
         print(f"  - Low conf threshold: {self.low_conf_threshold}")
         print(f"  - High conf threshold: {self.high_conf_threshold}")
+        
+        # =====================================================================
+        # [핵심 수정] 모든 모듈을 device로 이동
+        # =====================================================================
+        self.to(self.device)
 
     # =========================================================================
     # SR 모델 초기화 헬퍼
@@ -205,25 +185,15 @@ class Arch4Adaptive(BasePipeline):
     # =========================================================================
 
     def _needs_second_pass(self, detections: List[Dict]) -> List[bool]:
-        """
-        2차 탐지 필요 여부 판단
-        
-        Args: 
-            detections: 1차 탐지 결과 리스트
-                
-        Returns:
-            각 이미지별 2차 탐지 필요 여부
-        """
+        """2차 탐지 필요 여부 판단"""
         needs_pass2 = []
 
         for det in detections:
             scores = det.get('scores', torch.tensor([]))
 
             if len(scores) == 0:
-                # 탐지된 것이 없으면 2차 필요
                 needs_pass2.append(True)
             else:
-                # 낮은 confidence 탐지가 있으면 2차 필요
                 low_conf_mask = (scores > self.low_conf_threshold) & (scores < self.high_conf_threshold)
                 has_low_conf = low_conf_mask.any().item()
                 needs_pass2.append(has_low_conf)
@@ -236,18 +206,10 @@ class Arch4Adaptive(BasePipeline):
         det2: Dict[str, torch.Tensor],
         scale_factor: float = 1.0
     ) -> Dict[str, torch.Tensor]:
-        """
-        두 탐지 결과 병합 (NMS 적용)
-        
-        Args:
-            det1: 1차 탐지 결과
-            det2: 2차 탐지 결과
-            scale_factor: 좌표 스케일 (보통 1.0)
-        """
+        """두 탐지 결과 병합 (NMS 적용)"""
         device = det1['boxes'].device if len(det1['boxes']) > 0 else \
-                 det2['boxes'].device if len(det2['boxes']) > 0 else 'cpu'
+                 det2['boxes'].device if len(det2['boxes']) > 0 else self.device
 
-        # 결과 추출
         boxes1 = det1['boxes'] * scale_factor if len(det1['boxes']) > 0 else torch.zeros(0, 4, device=device)
         scores1 = det1['scores'] if len(det1['scores']) > 0 else torch.zeros(0, device=device)
         classes1 = det1['classes'] if len(det1['classes']) > 0 else torch.zeros(0, device=device)
@@ -256,7 +218,6 @@ class Arch4Adaptive(BasePipeline):
         scores2 = det2['scores'] if len(det2['scores']) > 0 else torch.zeros(0, device=device)
         classes2 = det2['classes'] if len(det2['classes']) > 0 else torch.zeros(0, device=device)
 
-        # 병합
         all_boxes = torch.cat([boxes1, boxes2], dim=0)
         all_scores = torch.cat([scores1, scores2], dim=0)           
         all_classes = torch.cat([classes1, classes2], dim=0)
@@ -268,7 +229,6 @@ class Arch4Adaptive(BasePipeline):
                 'classes': torch.zeros(0, device=device)
             }
         
-        # Batched NMS
         keep = batched_nms(
             all_boxes,
             all_scores,
@@ -276,7 +236,6 @@ class Arch4Adaptive(BasePipeline):
             self.merge_iou_threshold
         )
 
-        # Confidence threshold 적용
         final_mask = all_scores[keep] >= self.final_conf_threshold
         keep = keep[final_mask]
         
@@ -296,17 +255,10 @@ class Arch4Adaptive(BasePipeline):
         lr_image: torch.Tensor,
         return_intermediate: bool = False
     ) -> Dict[str, Any]:
-        """
-        추론용 Forward (2-Pass)
-        
-        Args:
-            lr_image: LR 입력 이미지
-            return_intermediate: 중간 결과 반환 여부
-        """
+        """추론용 Forward (2-Pass)"""
         self.eval()
         B = lr_image.size(0)
 
-        # LR 업샘플 (1차 탐지용)
         lr_upsampled = F.interpolate(
             lr_image,
             scale_factor=self.upscale_factor,
@@ -314,18 +266,15 @@ class Arch4Adaptive(BasePipeline):
             align_corners=False
         )
 
-        # 1차 탐지 (LR)
         pass1_detections = self.detector.predict(
             lr_upsampled,
             conf=self.low_conf_threshold,
             iou=0.45
         )
 
-        # 2차 탐지 필요 여부 판단
         needs_pass2 = self._needs_second_pass(pass1_detections)
         any_needs_pass2 = any(needs_pass2)
 
-        # 통계 업데이트
         self.total_inference_count += B
         if any_needs_pass2:
             self.pass2_trigger_count += sum(needs_pass2)
@@ -333,7 +282,6 @@ class Arch4Adaptive(BasePipeline):
         hr_image = None
         pass2_detections = [None] * B
 
-        # 2차 탐지 (필요한 경우)
         if any_needs_pass2:
             hr_image = self.sr_model(lr_image)
 
@@ -347,7 +295,6 @@ class Arch4Adaptive(BasePipeline):
                 if needs:
                     pass2_detections[i] = pass2_results[i]
 
-        # 결과 병합
         final_detections = []
 
         for i in range(B):
@@ -393,13 +340,7 @@ class Arch4Adaptive(BasePipeline):
         lr_image: torch.Tensor,
         hr_gt: Optional[torch.Tensor] = None
     ) -> Dict[str, Any]:
-        """
-        학습용 Forward
-        
-        Args:
-            lr_image: LR 입력
-            hr_gt: HR GT (SR Loss용)
-        """
+        """학습용 Forward"""
         self.train()
 
         hr_image = self.sr_model(lr_image)
@@ -432,15 +373,7 @@ class Arch4Adaptive(BasePipeline):
         hr_gt: Optional[torch.Tensor] = None,
         loss_mode: str = 'both'
     ) -> Dict[str, torch.Tensor]:
-        """
-        Loss 계산
-        
-        Args:
-            outputs: forward_train() 결과
-            targets: Detection GT
-            hr_gt: HR GT (SR Loss용)
-            loss_mode: 'hr_only', 'lr_only', 'both'
-        """
+        """Loss 계산"""
         hr_image = outputs['hr_image']
         lr_upsampled = outputs['lr_upsampled']
         detections_hr = outputs['detections_hr']
@@ -502,65 +435,6 @@ class Arch4Adaptive(BasePipeline):
         self.final_conf_threshold = original_final_conf
 
         return result
-
-    # =========================================================================
-    # Analysis Methods
-    # =========================================================================
-
-    def analyze_pass2_behavior(
-        self,
-        dataloader,
-        device: str = 'cuda',
-        num_batches: int = 50
-    ) -> Dict[str, Any]:
-        """Pass2 동작 분석"""
-        self.eval()
-        
-        stats = {
-            'pass2_triggered': 0,
-            'total_images': 0,
-            'pass1_det_counts': [],
-            'pass2_det_counts': [],
-            'merged_det_counts': []
-        }
-
-        with torch.no_grad():
-            for i, batch in enumerate(dataloader):
-                if i >= num_batches:
-                    break
-
-                if isinstance(batch, (list, tuple)):
-                    lr_image = batch[0]
-                else:
-                    lr_image = batch
-                
-                lr_image = lr_image.to(device)
-                result = self.forward(lr_image, return_intermediate=True)
-
-                B = lr_image.size(0)
-                stats['total_images'] += B
-                stats['pass2_triggered'] += sum(result['pass2_triggered'])
-
-                for j in range(B):
-                    p1_count = len(result['pass1_detections'][j]['boxes'])
-                    stats['pass1_det_counts'].append(p1_count)
-
-                    if result['pass2_detections'][j] is not None:
-                        p2_count = len(result['pass2_detections'][j]['boxes'])
-                    else:
-                        p2_count = 0
-                    stats['pass2_det_counts'].append(p2_count)
-
-                    merged_count = len(result['detections'][j]['boxes'])
-                    stats['merged_det_counts'].append(merged_count)
-
-        return {
-            'pass2_ratio': stats['pass2_triggered'] / max(stats['total_images'], 1),
-            'avg_pass1_detections': sum(stats['pass1_det_counts']) / max(len(stats['pass1_det_counts']), 1),
-            'avg_pass2_detections': sum(stats['pass2_det_counts']) / max(len(stats['pass2_det_counts']), 1),
-            'avg_merged_detections': sum(stats['merged_det_counts']) / max(len(stats['merged_det_counts']), 1),
-            'total_images': stats['total_images']
-        }
 
     # =========================================================================
     # Phase Control
@@ -688,101 +562,3 @@ class Arch4Adaptive(BasePipeline):
         """통계 리셋"""
         self.pass2_trigger_count.zero_()
         self.total_inference_count.zero_()
-
-
-# =============================================================================
-# 테스트
-# =============================================================================
-
-if __name__ == "__main__":
-    print("=" * 70)
-    print("Arch4 Adaptive 2-Pass 테스트 (RFDN + MambaSR)")
-    print("=" * 70)
-    
-    from types import SimpleNamespace
-    
-    device = 'cuda' if torch.cuda.is_available() else 'cpu'
-    print(f"Device: {device}")
-    
-    # Test 1: RFDN
-    print("\n" + "=" * 50)
-    print("[TEST 1] Arch4 + RFDN")
-    print("=" * 50)
-    
-    config_rfdn = SimpleNamespace(
-        model=SimpleNamespace(
-            sr_type='rfdn',
-            rfdn=SimpleNamespace(nf=50, num_modules=4),
-            yolo=SimpleNamespace(weights_path="yolov8n.pt", num_classes=80),
-            adaptive=SimpleNamespace(
-                low_conf_threshold=0.1,
-                high_conf_threshold=0.5,
-                merge_iou_threshold=0.5
-            )
-        ),
-        data=SimpleNamespace(upscale_factor=4, final_conf_threshold=0.25),
-        training=SimpleNamespace(sr_weight=0.3, det_weight=0.7),
-        device=device
-    )
-    
-    try:
-        model_rfdn = Arch4Adaptive(config_rfdn)
-        
-        lr_image = torch.randn(2, 3, 160, 160, device=device)
-        result = model_rfdn.forward(lr_image, return_intermediate=True)
-        
-        print(f"  ✓ Forward 성공!")
-        print(f"    - Pass2 triggered: {result['pass2_triggered']}")
-        print(f"    - Pass2 ratio: {result['pass2_ratio']:.2%}")
-        
-    except Exception as e:
-        print(f"  ✗ RFDN 테스트 실패: {e}")
-        import traceback
-        traceback.print_exc()
-    
-    # Test 2: MambaSR
-    print("\n" + "=" * 50)
-    print("[TEST 2] Arch4 + MambaSR")
-    print("=" * 50)
-    
-    config_mamba = SimpleNamespace(
-        model=SimpleNamespace(
-            sr_type='mamba',
-            mamba=SimpleNamespace(
-                img_size=64,
-                embed_dim=48,
-                d_state=8,
-                depths=[5, 5, 5, 5],
-                num_heads=[4, 4, 4, 4],
-                window_size=16
-            ),
-            yolo=SimpleNamespace(weights_path="yolov8n.pt", num_classes=80),
-            adaptive=SimpleNamespace(
-                low_conf_threshold=0.1,
-                high_conf_threshold=0.5,
-                merge_iou_threshold=0.5
-            )
-        ),
-        data=SimpleNamespace(upscale_factor=4, final_conf_threshold=0.25),
-        training=SimpleNamespace(sr_weight=0.3, det_weight=0.7),
-        device=device
-    )
-    
-    try:
-        model_mamba = Arch4Adaptive(config_mamba)
-        
-        lr_image = torch.randn(2, 3, 160, 160, device=device)
-        result = model_mamba.forward(lr_image, return_intermediate=True)
-        
-        print(f"  ✓ Forward 성공!")
-        print(f"    - Pass2 triggered: {result['pass2_triggered']}")
-        print(f"    - Pass2 ratio: {result['pass2_ratio']:.2%}")
-        
-    except Exception as e:
-        print(f"  ✗ MambaSR 테스트 실패: {e}")
-        import traceback
-        traceback.print_exc()
-    
-    print("\n" + "=" * 70)
-    print("✓ Arch4 Adaptive 테스트 완료!")
-    print("=" * 70)
