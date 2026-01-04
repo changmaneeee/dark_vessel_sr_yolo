@@ -10,6 +10,10 @@ arch2_softgate.py - Architecture 2: SoftGate Pipeline
 - 품질 좋은 이미지: SR 없이도 탐지 가능 → SR 스킵 (연산 절약)
 - 품질 나쁜 이미지: SR 필요 → SR 적용
 
+[지원 SR 모델]
+- RFDN: 경량, 빠름 (기본)
+- MambaSR: 고성능, Mamba 기반
+
 [아키텍처]
 
 LR Image [B, 3, H, W]
@@ -18,8 +22,8 @@ LR Image [B, 3, H, W]
     │                          │
     ▼                          ▼
 ┌─────────┐              ┌───────────┐
-│  Gate   │              │   RFDN    │
-│ Network │              │ (SR Model)│
+│  Gate   │              │ SR Model  │
+│ Network │              │(RFDN/Mamba│
 └────┬────┘              └─────┬─────┘
      │                         │
      │ gate ∈ [0,1]           │ SR Output
@@ -51,15 +55,6 @@ output = gate × SR(LR) + (1 - gate) × Bilinear_Upsample(LR)
 
 - gate ≈ 1: SR 결과 사용 (품질 나쁜 이미지)
 - gate ≈ 0: 단순 업샘플 (품질 좋은 이미지, SR 스킵)
-
-[장점]
-1. 연산량 절약: 품질 좋은 이미지는 SR 스킵
-2. End-to-end 학습: Detection loss가 Gate까지 역전파
-3. 유연한 판단: Gate가 자동으로 "탐지에 유리한 방향" 학습
-
-[vs Arch 0]
-- Arch 0: 항상 SR 적용 (고정)
-- Arch 2: 조건부 SR 적용 (적응적)
 """
 
 import torch
@@ -70,24 +65,27 @@ from typing import Dict, Any, Optional, Tuple, List
 from src.models.pipelines.base_pipeline import BasePipeline
 from src.models.sr_models.rfdn import RFDN
 from src.models.detectors.yolo_wrapper import YOLOWrapper
-from src.models.gates.soft_gate import LightweightGate #v2와 다른 버전도 추후 추가 예정
+from src.models.gates.soft_gate import LightweightGate
 from src.losses.detection_loss import DetectionLoss
 from src.losses.sr_loss import SRLoss
 from types import SimpleNamespace
 
 
 class Arch2SoftGate(BasePipeline):
+    """
+    Architecture 2: SoftGate Pipeline
+    
+    [지원 SR 모델]
+    - RFDN (기본)
+    - MambaSR
+    """
 
     SUPPORTED_SR_TYPES = ['rfdn', 'mamba']
 
     def __init__(self, config: Any):
         """
         Args:
-            sr_model: SR model
-            detector: Detection model
-            gate_network: Gate network for fusion
-            scale_factor: SR scale factor
-            device: Device
+            config: 설정 객체
         """
         super().__init__(config)
         
@@ -98,28 +96,96 @@ class Arch2SoftGate(BasePipeline):
                 return obj.get(key, default)
             return default
 
+        # Config 파싱
         model_config = get_val(config, 'model', config)
         data_config = get_val(config, 'data', SimpleNamespace())
-        rfdn_config = get_val(model_config, 'rfdn', SimpleNamespace())
-        self.nf = get_val(rfdn_config, 'nf', 50)
-        self.num_modules = get_val(rfdn_config, 'num_modules', 4)
-        yolo_config = get_val(model_config, 'yolo', SimpleNamespace())
-
+        
+        # Data 설정
+        self.upscale_factor = get_val(data_config, 'upscale_factor', 4)
+        
+        # SR 타입 결정
+        self.sr_type = get_val(model_config, 'sr_type', 'rfdn').lower()
+        
+        if self.sr_type not in self.SUPPORTED_SR_TYPES:
+            print(f"[Arch2] ⚠️ Unknown SR type '{self.sr_type}', falling back to RFDN")
+            self.sr_type = 'rfdn'
+        
+        # YOLO 설정
         yolo_config = get_val(model_config, 'yolo', SimpleNamespace())
         self.yolo_weights = get_val(yolo_config, 'weights_path', 'yolov8n.pt')
         self.num_classes = get_val(yolo_config, 'num_classes', 1)
 
+        # Gate 설정
         gate_config = get_val(model_config, 'gate', SimpleNamespace())
         self.gate_basechannels = get_val(gate_config, 'base_channels', 32)
         self.gate_num_layers = get_val(gate_config, 'num_layers', 4)
 
-        self.upscale_factor = get_val(data_config, 'upscale_factor', 4)
+        # =====================================================================
+        # Gate Network 생성
+        # =====================================================================
+        print(f"\n[Arch2] Initializing Gate Network...")
         self.gate_network = LightweightGate(
             in_channels=3,
             base_channels=self.gate_basechannels,   
             num_layers=self.gate_num_layers
         )
 
+        # =====================================================================
+        # SR 모델 생성
+        # =====================================================================
+        print(f"[Arch2] 선택된 SR 모델: {self.sr_type.upper()}")
+        
+        if self.sr_type == 'mamba':
+            self._init_mamba_sr(model_config)
+        else:
+            self._init_rfdn_sr(model_config)
+
+        # =====================================================================
+        # YOLO Detector 생성
+        # =====================================================================
+        print(f"[Arch2] Initializing YOLO...")
+        self.detector = YOLOWrapper(
+            model_path=self.yolo_weights,
+            num_classes=self.num_classes,
+            device=self.device,
+            verbose=False
+        )
+
+        # =====================================================================
+        # Loss Functions
+        # =====================================================================
+        self.det_loss_fn = DetectionLoss(self.detector.detection_model)
+        self.sr_loss_fn = SRLoss(l1_weight=1.0, charbonnier=True)
+
+        # Gate 통계 추적
+        self.register_buffer('gate_running_mean', torch.tensor(0.5))
+        self.register_buffer('gate_count', torch.tensor(0))
+
+        # 모델 정보 출력
+        total_params = sum(p.numel() for p in self.parameters())
+        gate_params = sum(p.numel() for p in self.gate_network.parameters())
+        sr_params = sum(p.numel() for p in self.sr_model.parameters())
+
+        print(f"\n[Arch2] ✓ Initialized")
+        print(f"  - SR Model: {self.sr_type.upper()}")
+        print(f"  - Gate params: {gate_params:,}")
+        print(f"  - SR params: {sr_params:,}")
+        print(f"  - Total params: {total_params:,}")
+
+    # =========================================================================
+    # SR 모델 초기화 헬퍼
+    # =========================================================================
+    
+    def _init_rfdn_sr(self, model_config):
+        """RFDN 초기화"""
+        rfdn_config = getattr(model_config, 'rfdn', {})
+        if isinstance(rfdn_config, dict):
+            self.nf = rfdn_config.get('nf', 50)
+            self.num_modules = rfdn_config.get('num_modules', 4)
+        else:
+            self.nf = getattr(rfdn_config, 'nf', 50)
+            self.num_modules = getattr(rfdn_config, 'num_modules', 4)
+        
         self.sr_model = RFDN(
             in_channels=3,
             out_channels=3,
@@ -127,52 +193,88 @@ class Arch2SoftGate(BasePipeline):
             num_modules=self.num_modules,
             upscale=self.upscale_factor
         )
-
-        self.detector = YOLOWrapper(
-            model_path = self.yolo_weights,
-            num_classes = self.num_classes,
-            device = self.device,
-            verbose=False
+        
+        # Pretrained 로드
+        pretrain_path = getattr(rfdn_config, 'pretrain_path', None) if hasattr(rfdn_config, 'pretrain_path') else None
+        if pretrain_path:
+            self.sr_model.load_pretrained(pretrain_path)
+            print(f"[Arch2] RFDN pretrained 로드: {pretrain_path}")
+    
+    def _init_mamba_sr(self, model_config):
+        """MambaSR 초기화"""
+        from src.models.sr_models.mamba_sr import MambaSR
+        
+        mamba_config = getattr(model_config, 'mamba', {})
+        if isinstance(mamba_config, dict):
+            img_size = mamba_config.get('img_size', 64)
+            embed_dim = mamba_config.get('embed_dim', 48)
+            d_state = mamba_config.get('d_state', 8)
+            depths = mamba_config.get('depths', [5, 5, 5, 5])
+            num_heads = mamba_config.get('num_heads', [4, 4, 4, 4])
+            window_size = mamba_config.get('window_size', 16)
+            pretrain_path = mamba_config.get('pretrain_path', None)
+        else:
+            img_size = getattr(mamba_config, 'img_size', 64)
+            embed_dim = getattr(mamba_config, 'embed_dim', 48)
+            d_state = getattr(mamba_config, 'd_state', 8)
+            depths = getattr(mamba_config, 'depths', [5, 5, 5, 5])
+            num_heads = getattr(mamba_config, 'num_heads', [4, 4, 4, 4])
+            window_size = getattr(mamba_config, 'window_size', 16)
+            pretrain_path = getattr(mamba_config, 'pretrain_path', None)
+        
+        self.sr_model = MambaSR(
+            scale_factor=self.upscale_factor,
+            img_size=img_size,
+            embed_dim=embed_dim,
+            d_state=d_state,
+            depths=depths,
+            num_heads=num_heads,
+            window_size=window_size,
+            pretrained_path=pretrain_path
         )
+        
+        print(f"[Arch2] MambaSR 초기화 완료")
 
-        self.det_loss_fn = DetectionLoss(self.detector.detection_model)
-        self.sr_loss_fn = SRLoss(l1_weight=1.0, charbonnier=True)
-
-        self.register_buffer('gate_running_mean', torch.tensor(0.5))
-        self.register_buffer('gate_count', torch.tensor(0))
-
-        total_params = sum(p.numel() for p in self.parameters())
-        gate_params = sum(p.numel() for p in self.gate_network.parameters())
-        sr_params = sum(p.numel() for p in self.sr_model.parameters())
-
-        print(f"\n[Arch2] ✓ Initialized")
-        print(f"  - Gate params: {gate_params:,}")
-        print(f"  - SR params: {sr_params:,}")
-        print(f"  - Total params: {total_params:,}")
-
-#============================================================================#
-# Forward
-#============================================================================#
+    # =========================================================================
+    # Forward
+    # =========================================================================
 
     def forward(
             self,
             lr_image: torch.Tensor,
             return_intermediates: bool = False
     ) -> Dict[str, Any]:
+        """
+        Forward pass
+        
+        Args:
+            lr_image: LR 입력 이미지 [B, 3, H, W]
+            return_intermediates: 중간 결과 반환 여부
+            
+        Returns:
+            Dict containing hr_image, gate, detections
+        """
         B = lr_image.size(0)
 
+        # 1. Gate 예측
         gate = self.gate_network(lr_image)
 
+        # 2. SR 수행
         sr_image = self.sr_model(lr_image)
+        
+        # 3. 단순 업샘플 (bypass path)
         upsampled = F.interpolate(
             lr_image,
             scale_factor=self.upscale_factor,
-            mode = 'bilinear',
-            align_corners = False
+            mode='bilinear',
+            align_corners=False
         )
-        gate_expaned = gate.view(B, 1, 1, 1)
-        hr_image = gate_expaned * sr_image + (1 - gate_expaned) * upsampled
+        
+        # 4. Soft blending
+        gate_expanded = gate.view(B, 1, 1, 1)
+        hr_image = gate_expanded * sr_image + (1 - gate_expanded) * upsampled
 
+        # 5. Detection
         if self.training:
             self.detector.train()
             detections = self.detector(hr_image)
@@ -180,11 +282,12 @@ class Arch2SoftGate(BasePipeline):
             self.detector.eval()
             detections = self.detector.predict(hr_image)
 
+        # Gate 통계 업데이트
         if self.training:
             with torch.no_grad():
                 batch_mean = gate.mean()
                 self.gate_running_mean = 0.99 * self.gate_running_mean + 0.01 * batch_mean
-                self.gate_count +=1
+                self.gate_count += 1
 
         result = {
             'hr_image': hr_image,
@@ -195,31 +298,39 @@ class Arch2SoftGate(BasePipeline):
         if return_intermediates:
             result['sr_image'] = sr_image
             result['upsampled'] = upsampled
+            result['lr_image'] = lr_image
+            
         return result
     
     def forward_with_gate_control(
             self,
             lr_image: torch.Tensor,
             force_gate: Optional[float] = None,
-    )-> Dict[str, Any]:
+    ) -> Dict[str, Any]:
+        """
+        Gate 값을 강제로 지정하여 forward
         
+        Args:
+            lr_image: LR 입력
+            force_gate: 강제 gate 값 (None이면 학습된 gate 사용)
+        """
         B = lr_image.size(0)
 
         if force_gate is not None:
-            gate = torch.full((B,1), force_gate, device=lr_image.device)
+            gate = torch.full((B, 1), force_gate, device=lr_image.device)
         else:
             gate = self.gate_network(lr_image)
         
         sr_image = self.sr_model(lr_image)
         upsampled = F.interpolate(
             lr_image, 
-            scale_factor = self.upscale_factor,
-            mode = 'bilinear',
-            align_corners = False
+            scale_factor=self.upscale_factor,
+            mode='bilinear',
+            align_corners=False
         )
         
-        gate_expaned = gate.view(B,1,1,1)
-        hr_image = gate_expaned * sr_image + (1 - gate_expaned) * upsampled
+        gate_expanded = gate.view(B, 1, 1, 1)
+        hr_image = gate_expanded * sr_image + (1 - gate_expanded) * upsampled
 
         self.detector.eval()
         detections = self.detector.predict(hr_image)
@@ -231,21 +342,31 @@ class Arch2SoftGate(BasePipeline):
             'sr_image': sr_image,
             'upsampled': upsampled
         }
-#============================================================================#
-# Loss Computation
-#============================================================================#
+
+    # =========================================================================
+    # Loss Computation
+    # =========================================================================
+    
     def compute_loss(
             self,
-            outputs: Dict[str,Any],
+            outputs: Dict[str, Any],
             targets: torch.Tensor,
-            hr_gt: Optional[torch.Tensor]= None
-    )->Dict[str, torch.Tensor]:
+            hr_gt: Optional[torch.Tensor] = None
+    ) -> Dict[str, torch.Tensor]:
+        """
+        Loss 계산
+        
+        Args:
+            outputs: forward() 결과
+            targets: Detection GT [N, 6]
+            hr_gt: HR GT 이미지 (선택)
+        """
         hr_image = outputs['hr_image']
         gate = outputs['gate']
-        detections = outputs['detections']
 
         device = hr_image.device
 
+        # Detection Loss 초기화
         det_loss_dict = {
             'total': torch.tensor(0.0, device=device),
             'box_loss': torch.tensor(0.0, device=device),
@@ -253,22 +374,17 @@ class Arch2SoftGate(BasePipeline):
             'dfl_loss': torch.tensor(0.0, device=device)
         }
 
-        if targets is not None and len(targets) >0:
+        if targets is not None and len(targets) > 0:
             self.detector.train()
             preds = self.detector(hr_image)
-
             det_loss_dict = self.det_loss_fn(preds, targets, hr_image)
 
         det_loss = det_loss_dict['total']
 
-        sr_loss = det_loss_dict['total']
-        # =====================================================================
         # SR Loss (선택적)
-        # =====================================================================
         sr_loss = torch.tensor(0.0, device=device)
         
         if hr_gt is not None and self._sr_weight > 0:
-            # SR 출력과 GT 비교
             if 'sr_image' in outputs:
                 sr_image = outputs['sr_image']
             else:
@@ -276,18 +392,11 @@ class Arch2SoftGate(BasePipeline):
             
             sr_loss_dict = self.sr_loss_fn(sr_image, hr_gt)
             sr_loss = sr_loss_dict['total']
-        # =====================================================================
+
         # Gate Regularization (선택적)
-        # =====================================================================
         gate_reg_loss = torch.tensor(0.0, device=device)
         
-        # Gate가 너무 한쪽으로 치우치지 않도록 약간의 정규화
-        # 목표: gate 값이 0.3 ~ 0.7 사이에 분포하도록 유도 (선택적)
-        # gate_reg_loss = F.mse_loss(gate.mean(), torch.tensor(0.5, device=device))
-        
-        # =====================================================================
         # Total Loss
-        # =====================================================================
         total_loss = self._det_weight * det_loss + self._sr_weight * sr_loss
         
         return {
@@ -301,6 +410,7 @@ class Arch2SoftGate(BasePipeline):
             'gate_mean': gate.mean().detach(),
             'gate_std': gate.std().detach()
         }
+
     # =========================================================================
     # Inference
     # =========================================================================
@@ -312,17 +422,7 @@ class Arch2SoftGate(BasePipeline):
         conf_threshold: float = 0.25,
         iou_threshold: float = 0.45
     ) -> Dict[str, Any]:
-        """
-        추론 모드
-        
-        Returns:
-            {
-                'detections': 탐지 결과,
-                'gate': Gate 값,
-                'hr_image': 출력 이미지,
-                'sr_applied_ratio': SR 적용 비율
-            }
-        """
+        """추론 모드"""
         self.eval()
         
         result = self.forward(lr_image, return_intermediates=True)
@@ -347,17 +447,7 @@ class Arch2SoftGate(BasePipeline):
         device: str = 'cuda',
         num_batches: int = 50
     ) -> Dict[str, Any]:
-        """
-        Gate 동작 분석
-        
-        Returns:
-            {
-                'gate_mean': 평균 gate 값,
-                'gate_std': 표준편차,
-                'sr_ratio': SR 적용 비율 (gate > 0.5),
-                'gate_histogram': gate 분포
-            }
-        """
+        """Gate 동작 분석"""
         self.eval()
         gates = []
         
@@ -377,7 +467,6 @@ class Arch2SoftGate(BasePipeline):
         
         gates = torch.cat(gates, dim=0).squeeze()
         
-        # 히스토그램
         hist, bin_edges = torch.histogram(gates, bins=10, range=(0., 1.))
         
         return {
@@ -393,66 +482,23 @@ class Arch2SoftGate(BasePipeline):
             }
         }
     
-    def compare_with_without_sr(
-        self,
-        lr_image: torch.Tensor,
-        targets: torch.Tensor
-    ) -> Dict[str, Any]:
-        """
-        SR 적용/미적용 결과 비교 (분석용)
-        
-        Returns:
-            {
-                'with_sr': SR 적용 결과,
-                'without_sr': SR 미적용 결과,
-                'soft_gate': Soft gate 결과,
-                'gate_value': 실제 gate 값
-            }
-        """
-        self.eval()
-        
-        with torch.no_grad():
-            # SR 강제 적용
-            result_with_sr = self.forward_with_gate_control(lr_image, force_gate=1.0)
-            
-            # SR 강제 스킵
-            result_without_sr = self.forward_with_gate_control(lr_image, force_gate=0.0)
-            
-            # 정상 동작
-            result_soft = self.forward_with_gate_control(lr_image, force_gate=None)
-        
-        return {
-            'with_sr': result_with_sr,
-            'without_sr': result_without_sr,
-            'soft_gate': result_soft,
-            'gate_value': result_soft['gate'].squeeze().tolist()
-        }
-    
     # =========================================================================
     # Phase Control
     # =========================================================================
     
     def freeze_sr_and_yolo(self) -> None:
-        """
-        Phase 1: Gate만 학습
-        
-        SR과 YOLO를 pretrain된 상태로 freeze하고
-        Gate만 학습시킬 때 사용
-        """
-        # SR freeze
+        """Phase 1: Gate만 학습"""
         for param in self.sr_model.parameters():
             param.requires_grad = False
         
-        # YOLO freeze
         self.detector.freeze()
         self.detector.set_bn_eval()
         
-        # Gate unfreeze
         for param in self.gate_network.parameters():
             param.requires_grad = True
         
         print("[Arch2] Phase 1: Gate only training")
-        print(f"  - SR: frozen")
+        print(f"  - SR ({self.sr_type}): frozen")
         print(f"  - YOLO: frozen")
         print(f"  - Gate: trainable")
     
@@ -475,18 +521,7 @@ class Arch2SoftGate(BasePipeline):
         sr_lr_scale: float = 0.1,
         yolo_lr_scale: float = 0.1
     ) -> List[Dict]:
-        """
-        파라미터 그룹 반환 (다른 LR 적용용)
-        
-        Args:
-            base_lr: 기본 학습률
-            gate_lr_scale: Gate LR 배율
-            sr_lr_scale: SR LR 배율
-            yolo_lr_scale: YOLO LR 배율
-        
-        Returns:
-            optimizer에 전달할 파라미터 그룹 리스트
-        """
+        """파라미터 그룹 반환"""
         return [
             {
                 'params': self.gate_network.parameters(),
@@ -519,10 +554,11 @@ class Arch2SoftGate(BasePipeline):
         
         info.update({
             'architecture': 'Arch2_SoftGate',
+            'sr_type': self.sr_type,
             'description': 'Conditional SR with learnable gate network',
             'components': {
                 'gate': f'LightweightGate ({gate_params:,} params)',
-                'sr_model': f'RFDN ({sr_params:,} params)',
+                'sr_model': f'{self.sr_type.upper()} ({sr_params:,} params)',
                 'detector': f'YOLO ({yolo_params:,} params)'
             },
             'gate_running_mean': self.gate_running_mean.item(),
@@ -545,7 +581,7 @@ class Arch2SoftGate(BasePipeline):
 
 if __name__ == "__main__":
     print("=" * 70)
-    print("Arch2 SoftGate 테스트")
+    print("Arch2 SoftGate 테스트 (RFDN + MambaSR)")
     print("=" * 70)
     
     from types import SimpleNamespace
@@ -553,9 +589,14 @@ if __name__ == "__main__":
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
     print(f"Device: {device}")
     
-    # Config
-    config = SimpleNamespace(
+    # Test 1: RFDN
+    print("\n" + "=" * 50)
+    print("[TEST 1] Arch2 + RFDN")
+    print("=" * 50)
+    
+    config_rfdn = SimpleNamespace(
         model=SimpleNamespace(
+            sr_type='rfdn',
             rfdn=SimpleNamespace(nf=50, num_modules=4),
             yolo=SimpleNamespace(weights_path="yolov8n.pt", num_classes=80),
             gate=SimpleNamespace(base_channels=32, num_layers=4)
@@ -566,92 +607,67 @@ if __name__ == "__main__":
     )
     
     try:
-        # 1. 모델 생성
-        print("\n[1. 모델 생성]")
-        model = Arch2SoftGate(config)
-        model.to(device)
-        print("✓ Arch2SoftGate 생성 성공")
+        model_rfdn = Arch2SoftGate(config_rfdn)
+        model_rfdn.to(device)
         
-        # 2. Forward
-        print("\n[2. Forward 테스트]")
         lr_image = torch.randn(2, 3, 160, 160, device=device)
+        model_rfdn.eval()
         
-        model.eval()
         with torch.no_grad():
-            result = model(lr_image, return_intermediates=True)
+            result = model_rfdn(lr_image, return_intermediates=True)
         
-        print(f"  LR input: {lr_image.shape}")
-        print(f"  HR output: {result['hr_image'].shape}")
-        print(f"  Gate values: {result['gate'].squeeze().tolist()}")
-        print(f"  SR image: {result['sr_image'].shape}")
-        print(f"  Upsampled: {result['upsampled'].shape}")
-        
-        # 3. Gate 강제 제어
-        print("\n[3. Gate 강제 제어 테스트]")
-        
-        result_sr = model.forward_with_gate_control(lr_image, force_gate=1.0)
-        result_bypass = model.forward_with_gate_control(lr_image, force_gate=0.0)
-        
-        sr_det_count = sum(len(d['boxes']) for d in result_sr['detections'])
-        bypass_det_count = sum(len(d['boxes']) for d in result_bypass['detections'])
-        
-        print(f"  SR 강제 적용: {sr_det_count} detections")
-        print(f"  SR 스킵: {bypass_det_count} detections")
-        
-        # 4. Loss 계산
-        print("\n[4. Loss 테스트]")
-        
-        targets = torch.tensor([
-            [0, 0, 0.5, 0.5, 0.2, 0.2],
-            [1, 0, 0.3, 0.7, 0.15, 0.25],
-        ], device=device)
-        
-        model.train()
-        result = model(lr_image, return_intermediates=True)
-        loss_dict = model.compute_loss(result, targets)
-        
-        print("  Loss 결과:")
-        for k, v in loss_dict.items():
-            if isinstance(v, torch.Tensor):
-                print(f"    {k}: {v.item():.6f}")
-        
-        # 5. Gradient Flow
-        print("\n[5. Gradient Flow 테스트]")
-        
-        if loss_dict['total'].requires_grad:
-            loss_dict['total'].backward()
-            
-            gate_has_grad = any(p.grad is not None and p.grad.abs().sum() > 0 
-                               for p in model.gate_network.parameters())
-            sr_has_grad = any(p.grad is not None and p.grad.abs().sum() > 0 
-                             for p in model.sr_model.parameters())
-            
-            print(f"  ✓ Gate gradient: {gate_has_grad}")
-            print(f"  ✓ SR gradient: {sr_has_grad}")
-        
-        # 6. Phase 테스트
-        print("\n[6. Phase 테스트]")
-        model.freeze_sr_and_yolo()
-        
-        gate_trainable = sum(p.numel() for p in model.gate_network.parameters() if p.requires_grad)
-        sr_trainable = sum(p.numel() for p in model.sr_model.parameters() if p.requires_grad)
-        
-        print(f"  Gate trainable: {gate_trainable:,}")
-        print(f"  SR trainable: {sr_trainable:,}")
-        '''
-        # 7. 아키텍처 정보
-        print("\n[7. 아키텍처 정보]")
-        info = model.get_architecture_info()
-        print(f"  Architecture: {info['architecture']}")
-        print(f"  Components: {info['components']}")
-        
-        print("\n" + "=" * 70)
-        '''
-        print("✓ Arch2 SoftGate 테스트 완료!")
-        #print("=" * 70)
+        print(f"  ✓ Forward 성공!")
+        print(f"    - HR output: {result['hr_image'].shape}")
+        print(f"    - Gate values: {result['gate'].squeeze().tolist()}")
         
     except Exception as e:
-        print(f"테스트 실패: {e}")
+        print(f"  ✗ RFDN 테스트 실패: {e}")
         import traceback
         traceback.print_exc()
-
+    
+    # Test 2: MambaSR
+    print("\n" + "=" * 50)
+    print("[TEST 2] Arch2 + MambaSR")
+    print("=" * 50)
+    
+    config_mamba = SimpleNamespace(
+        model=SimpleNamespace(
+            sr_type='mamba',
+            mamba=SimpleNamespace(
+                img_size=64,
+                embed_dim=48,
+                d_state=8,
+                depths=[5, 5, 5, 5],
+                num_heads=[4, 4, 4, 4],
+                window_size=16
+            ),
+            yolo=SimpleNamespace(weights_path="yolov8n.pt", num_classes=80),
+            gate=SimpleNamespace(base_channels=32, num_layers=4)
+        ),
+        data=SimpleNamespace(upscale_factor=4),
+        training=SimpleNamespace(sr_weight=0.3, det_weight=0.7),
+        device=device
+    )
+    
+    try:
+        model_mamba = Arch2SoftGate(config_mamba)
+        model_mamba.to(device)
+        
+        lr_image = torch.randn(2, 3, 160, 160, device=device)
+        model_mamba.eval()
+        
+        with torch.no_grad():
+            result = model_mamba(lr_image, return_intermediates=True)
+        
+        print(f"  ✓ Forward 성공!")
+        print(f"    - HR output: {result['hr_image'].shape}")
+        print(f"    - Gate values: {result['gate'].squeeze().tolist()}")
+        
+    except Exception as e:
+        print(f"  ✗ MambaSR 테스트 실패: {e}")
+        import traceback
+        traceback.print_exc()
+    
+    print("\n" + "=" * 70)
+    print("✓ Arch2 SoftGate 테스트 완료!")
+    print("=" * 70)
