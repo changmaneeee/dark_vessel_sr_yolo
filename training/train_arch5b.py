@@ -306,14 +306,25 @@ class Arch5BTrainer:
             
             total_loss += loss_dict['total'].item()
             
-            # PSNR (SR 이미지)
-            sr_images = outputs[0] if isinstance(outputs, tuple) else outputs
-            if sr_images.shape[-2:] != hr_images.shape[-2:]:
-                sr_images = F.interpolate(sr_images, size=hr_images.shape[-2:], mode='bilinear')
+            # PSNR (SR 이미지) - outputs 구조 처리
+            # Arch5B forward returns: (sr_image, detections) 또는 중첩 tuple
+            if isinstance(outputs, tuple):
+                sr_images = outputs[0]
+                # 중첩 tuple인 경우 (예: ((sr_image, features), detections))
+                while isinstance(sr_images, tuple):
+                    sr_images = sr_images[0]
+            else:
+                sr_images = outputs
             
-            mse = F.mse_loss(sr_images, hr_images)
-            psnr = 10 * torch.log10(1.0 / (mse + 1e-8))
-            total_psnr += psnr.item()
+            if sr_images is not None and isinstance(sr_images, torch.Tensor):
+                if sr_images.shape[-2:] != hr_images.shape[-2:]:
+                    sr_images = F.interpolate(sr_images, size=hr_images.shape[-2:], mode='bilinear')
+                
+                mse = F.mse_loss(sr_images, hr_images)
+                psnr = 10 * torch.log10(1.0 / (mse + 1e-8))
+                total_psnr += psnr.item()
+            else:
+                total_psnr += 0.0
             
             num_batches += 1
         
