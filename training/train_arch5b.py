@@ -243,7 +243,7 @@ class Arch5BTrainer:
             
             # Forward + Loss
             with autocast(enabled=self.use_amp):
-                outputs = self.model(lr_images)
+                outputs = self.model(lr_images, return_features=True)
                 loss_dict = self.model.compute_loss(outputs, targets, hr_gt=hr_images, lr_image=lr_images)
                 loss = loss_dict['total']
             
