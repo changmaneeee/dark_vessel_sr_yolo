@@ -19,26 +19,6 @@ Arch2 (SoftGate): Gate가 SR 적용 여부 결정
         --max_samples 1000
 """
 
-#!/usr/bin/env python
-"""
-=============================================================================
-inference_compare.py - Arch0 vs Arch2 비교 추론 (4060 PC용)
-=============================================================================
-Arch0 (Sequential): 항상 SR 적용
-Arch2 (SoftGate): Gate가 SR 적용 여부 결정
-
-사용법:
-    cd ~/dark_vessel_sr_yolo
-    
-    python inference_compare.py \
-        --lr_root /home/changmin/smart_airbus_data_lr \
-        --hr_root /home/changmin/smart_airbus_data_hr \
-        --rfdn_weights ./weights/rfdn/model_best.pt \
-        --yolo_weights ./weights/yolo_lr/8s/best.pt \
-        --gate_weights ./training/gate_arch2/checkpoints/gate_gt/gate_best.pt \
-        --output ./results/arch0_vs_arch2 \
-        --max_samples 1000
-"""
 
 import argparse
 import json
@@ -107,8 +87,24 @@ class LightweightGate(nn.Module):
 
 
 # =============================================================================
-# RFDN Model (공식 repo 가중치 호환 버전)
+# RFDN Model (공식 repo 가중치 호환 버전 + MeanShift)
 # =============================================================================
+
+# EDSR/RFDN 표준 RGB mean (ImageNet 기반)
+RGB_MEAN = (0.4488, 0.4371, 0.4040)  # [0, 1] 기준
+RGB_MEAN_255 = [x * 255 for x in RGB_MEAN]  # [114.44, 111.46, 103.02]
+
+
+class MeanShift(nn.Module):
+    """RGB Mean Shift for EDSR/RFDN style models"""
+    def __init__(self, rgb_range=255, rgb_mean=RGB_MEAN, sign=-1):
+        super(MeanShift, self).__init__()
+        std = [1.0, 1.0, 1.0]
+        self.register_buffer('shift', torch.Tensor([m * rgb_range * sign for m in rgb_mean]).view(1, 3, 1, 1))
+    
+    def forward(self, x):
+        return x + self.shift
+
 
 def conv_layer(in_channels, out_channels, kernel_size, stride=1, dilation=1, groups=1, bias=True):
     padding = int((kernel_size - 1) / 2) * dilation
@@ -147,12 +143,13 @@ class ESA(nn.Module):
 
 
 class RFDB(nn.Module):
-    """Residual Feature Distillation Block"""
+    """Residual Feature Distillation Block (block.py와 동일)"""
     
-    def __init__(self, in_channels, distillation_rate=0.5):  # 서버 학습 설정: 0.5
+    def __init__(self, in_channels, distillation_rate=0.25):
         super(RFDB, self).__init__()
-        self.dc = self.distilled_channels = int(in_channels * distillation_rate)
-        self.rc = self.remaining_channels = in_channels
+        # block.py: in_channels//2로 하드코딩 (distillation_rate 무시)
+        self.dc = self.distilled_channels = in_channels // 2  # = 25
+        self.rc = self.remaining_channels = in_channels       # = 50
         
         self.c1_d = conv_layer(in_channels, self.dc, 1)
         self.c1_r = conv_layer(in_channels, self.rc, 3)
@@ -167,19 +164,26 @@ class RFDB(nn.Module):
 
     def forward(self, input):
         distilled_c1 = self.act(self.c1_d(input))
-        r_c1 = self.act(self.c1_r(input) + input)
+        r_c1 = self.c1_r(input)
+        r_c1 = self.act(r_c1 + input)
+        
         distilled_c2 = self.act(self.c2_d(r_c1))
-        r_c2 = self.act(self.c2_r(r_c1) + r_c1)
+        r_c2 = self.c2_r(r_c1)
+        r_c2 = self.act(r_c2 + r_c1)
+        
         distilled_c3 = self.act(self.c3_d(r_c2))
-        r_c3 = self.act(self.c3_r(r_c2) + r_c2)
+        r_c3 = self.c3_r(r_c2)
+        r_c3 = self.act(r_c3 + r_c2)
+        
         r_c4 = self.act(self.c4(r_c3))
+        
         out = torch.cat([distilled_c1, distilled_c2, distilled_c3, r_c4], dim=1)
         out_fused = self.esa(self.c5(out))
-        return out_fused + input
+        return out_fused  # block.py: residual 없음!
 
 
 class RFDN(nn.Module):
-    """RFDN - 공식 repo 가중치 호환 (c.0, upsampler.0 구조)"""
+    """RFDN - 공식 repo 가중치 호환 (block.py 구조 일치)"""
     
     def __init__(self, in_nc=3, nf=50, num_modules=4, out_nc=3, upscale=4):
         super(RFDN, self).__init__()
@@ -191,14 +195,15 @@ class RFDN(nn.Module):
         self.B3 = RFDB(nf)
         self.B4 = RFDB(nf)
         
-        # 공식 repo: Sequential[0]
+        # block.py: conv_block with lrelu
         self.c = nn.Sequential(
-            conv_layer(nf * num_modules, nf, 1)
+            conv_layer(nf * num_modules, nf, 1),
+            nn.LeakyReLU(negative_slope=0.05, inplace=True)
         )
         
         self.LR_conv = conv_layer(nf, nf, 3)
         
-        # 공식 repo: Sequential[0]
+        # pixelshuffle_block
         self.upsampler = nn.Sequential(
             conv_layer(nf, out_nc * (upscale ** 2), 3),
             nn.PixelShuffle(upscale)
@@ -216,8 +221,35 @@ class RFDN(nn.Module):
         return output
 
 
+class RFDNWithMeanShift(nn.Module):
+    """RFDN with MeanShift preprocessing (shift_mean=True 대응)"""
+    
+    def __init__(self, rfdn_model):
+        super().__init__()
+        self.sub_mean = MeanShift(rgb_range=255, sign=-1)  # 입력: mean 빼기
+        self.add_mean = MeanShift(rgb_range=255, sign=1)   # 출력: mean 더하기
+        self.model = rfdn_model
+    
+    def forward(self, x):
+        x = self.sub_mean(x)
+        x = self.model(x)
+        x = self.add_mean(x)
+        return x
+
+    def forward(self, input):
+        out_fea = self.fea_conv(input)
+        out_B1 = self.B1(out_fea)
+        out_B2 = self.B2(out_B1)
+        out_B3 = self.B3(out_B2)
+        out_B4 = self.B4(out_B3)
+        out_B = self.c(torch.cat([out_B1, out_B2, out_B3, out_B4], dim=1))
+        out_lr = self.LR_conv(out_B) + out_fea
+        output = self.upsampler(out_lr)
+        return output
+
+
 def load_rfdn_model(weights_path: str, device: torch.device):
-    """RFDN 모델 로드 (공식 repo 가중치 호환)"""
+    """RFDN 모델 로드 (MeanShift 없음 - RFDN은 shift_mean 미적용)"""
     
     print(f"  Loading RFDN from {weights_path}...")
     
@@ -238,12 +270,17 @@ def load_rfdn_model(weights_path: str, device: torch.device):
     
     print(f"    State dict: {len(state_dict)} keys")
     
-    # 모델 생성
+    # RFDN 모델 생성
     model = RFDN(in_nc=3, nf=50, num_modules=4, out_nc=3, upscale=4)
     
-    # 로드
-    model.load_state_dict(state_dict)
-    print("  [✓] RFDN loaded successfully!")
+    # 가중치 로드
+    missing, unexpected = model.load_state_dict(state_dict, strict=False)
+    if missing:
+        print(f"    ⚠️ Missing keys: {missing}")
+    if unexpected:
+        print(f"    ⚠️ Unexpected keys: {unexpected}")
+    
+    print("  [✓] RFDN loaded (no MeanShift)")
     
     model.to(device)
     model.eval()
@@ -321,13 +358,21 @@ def collate_fn(batch):
 # =============================================================================
 
 def preprocess_for_sr(img, device):
-    t = torch.from_numpy(img.astype(np.float32) / 255.0)
+    """[0, 255] uint8 -> [0, 255] float tensor (공식 RFDN repo 방식)"""
+    t = torch.from_numpy(img.astype(np.float32))  # [0, 255] 유지
+    return t.permute(2, 0, 1).unsqueeze(0).to(device)
+
+
+def preprocess_for_gate(img, device):
+    """[0, 255] uint8 -> [0, 1] float tensor (Gate 학습 방식)"""
+    t = torch.from_numpy(img.astype(np.float32) / 255.0)  # [0, 1] 정규화
     return t.permute(2, 0, 1).unsqueeze(0).to(device)
 
 
 def postprocess_sr(tensor):
+    """[0, 255] float tensor -> [0, 255] uint8 (공식 RFDN repo 방식)"""
     img = tensor.squeeze(0).permute(1, 2, 0).cpu().numpy()
-    return np.clip(img * 255, 0, 255).astype(np.uint8)
+    return np.clip(img, 0, 255).astype(np.uint8)
 
 
 def calculate_psnr(img1, img2):
@@ -451,9 +496,9 @@ def run_arch2_inference(dataloader, rfdn, yolo, gate, device, output_dir, thresh
                 torch.cuda.synchronize()
             start = time.time()
             
-            # Gate
-            lr_t = preprocess_for_sr(lr_img, device)
-            gate_in = F.interpolate(lr_t, size=(160, 160), mode='bilinear', align_corners=False)
+            # Gate (별도 [0,1] 정규화)
+            gate_tensor = preprocess_for_gate(lr_img, device)
+            gate_in = F.interpolate(gate_tensor, size=(160, 160), mode='bilinear', align_corners=False)
             
             with torch.no_grad():
                 gate_prob = gate(gate_in).item()
@@ -465,6 +510,7 @@ def run_arch2_inference(dataloader, rfdn, yolo, gate, device, output_dir, thresh
             # SR or Bypass
             if apply_sr:
                 sr_count += 1
+                lr_t = preprocess_for_sr(lr_img, device)  # RFDN은 [0,255]
                 with torch.no_grad():
                     sr_t = rfdn(lr_t)
                 out_img = postprocess_sr(sr_t)
