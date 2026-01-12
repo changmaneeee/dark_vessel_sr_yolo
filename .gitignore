@@ -3,6 +3,7 @@
 # Data & Datasets
 data/
 datasets/
+weights/
 *.csv
 *.json
 *.h5

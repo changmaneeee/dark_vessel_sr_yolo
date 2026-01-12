@@ -7,9 +7,9 @@ from pathlib import Path
 # =========================================================
 # [설정] PC 환경에 맞게 경로 수정
 # =========================================================
-SOURCE_ROOT = "/home/octolab-rtx4090/Desktop/changmin/cv_detact_ship/datas/airbus_dataset"
-DEST_ROOT = "/home/octolab-rtx4090/Desktop/changmin/smart_airbus_data"
-
+SOURCE_ROOT = "/home/changmin/cv_ship_detact/datas/airbus_dataset"
+DEST_ROOT = "/home/changmin/smart_airbus_data"
+# =========================================================
 def create_smart_subset_v2():
     print("🚀 스크립트가 시작되었습니다! (Logic: Scan Images first)", flush=True)
     

@@ -285,14 +285,12 @@ class Arch5BTrainer:
     
     @torch.no_grad()
     def validate(self) -> Dict[str, float]:
-        """Validation"""
+        """Validation - Detection Loss only"""
         if self.val_loader is None:
             return {}
         
         self.model.eval()
-        
         total_loss = 0.0
-        total_psnr = 0.0
         num_batches = 0
         
         for batch in tqdm(self.val_loader, desc="Validation"):
@@ -301,37 +299,13 @@ class Arch5BTrainer:
             targets = batch['targets'].to(self.device)
             
             with autocast(enabled=self.use_amp):
-                outputs = self.model(lr_images)
+                outputs = self.model(lr_images, return_features=True)
                 loss_dict = self.model.compute_loss(outputs, targets, hr_gt=hr_images, lr_image=lr_images)
             
             total_loss += loss_dict['total'].item()
-            
-            # PSNR (SR 이미지) - outputs 구조 처리
-            # Arch5B forward returns: (sr_image, detections) 또는 중첩 tuple
-            if isinstance(outputs, tuple):
-                sr_images = outputs[0]
-                # 중첩 tuple인 경우 (예: ((sr_image, features), detections))
-                while isinstance(sr_images, tuple):
-                    sr_images = sr_images[0]
-            else:
-                sr_images = outputs
-            
-            if sr_images is not None and isinstance(sr_images, torch.Tensor):
-                if sr_images.shape[-2:] != hr_images.shape[-2:]:
-                    sr_images = F.interpolate(sr_images, size=hr_images.shape[-2:], mode='bilinear')
-                
-                mse = F.mse_loss(sr_images, hr_images)
-                psnr = 10 * torch.log10(1.0 / (mse + 1e-8))
-                total_psnr += psnr.item()
-            else:
-                total_psnr += 0.0
-            
             num_batches += 1
         
-        return {
-            'loss': total_loss / num_batches,
-            'psnr': total_psnr / num_batches
-        }
+        return {'loss': total_loss / num_batches}
     
     def save_checkpoint(self, epoch: int, metrics: Dict, is_best: bool = False):
         """체크포인트 저장"""

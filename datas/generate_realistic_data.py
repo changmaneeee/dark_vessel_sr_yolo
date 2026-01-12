@@ -8,8 +8,8 @@ import random
 # ==========================================
 # ⚙️ Configuration (실험 설정)
 # ==========================================
-INPUT_HR_DIR = '/home/octolab-rtx4090/Desktop/changmin/smart_airbus_data/hr/images/val'  # 원본 HR 이미지 경로 (사용자 환경에 맞게 수정)
-OUTPUT_LR_DIR = '/home/octolab-rtx4090/Desktop/changmin/smart_airbus_data/lr/images/val' # 생성될 LR 이미지 경로
+INPUT_HR_DIR = '/home/changmin/smart_airbus_data/images/val'  # 원본 HR 이미지 경로 (사용자 환경에 맞게 수정)
+OUTPUT_LR_DIR = '/home/changmin/smart_airbus_data_lr/images/val' # 생성될 LR 이미지 경로
 SCALE_FACTOR = 4  # 1.5m -> 6m (4배 축소)
 
 # Degradation Hyperparameters (논문에 명시할 값들)
