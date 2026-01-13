@@ -19,6 +19,26 @@ Arch2 (SoftGate): Gate가 SR 적용 여부 결정
         --max_samples 1000
 """
 
+#!/usr/bin/env python
+"""
+=============================================================================
+inference_compare.py - Arch0 vs Arch2 비교 추론 (4060 PC용)
+=============================================================================
+Arch0 (Sequential): 항상 SR 적용
+Arch2 (SoftGate): Gate가 SR 적용 여부 결정
+
+사용법:
+    cd ~/dark_vessel_sr_yolo
+    
+    python inference_compare.py \
+        --lr_root /home/changmin/smart_airbus_data_lr \
+        --hr_root /home/changmin/smart_airbus_data_hr \
+        --rfdn_weights ./weights/rfdn/model_best.pt \
+        --yolo_weights ./weights/yolo_lr/8s/best.pt \
+        --gate_weights ./training/gate_arch2/checkpoints/gate_gt/gate_best.pt \
+        --output ./results/arch0_vs_arch2 \
+        --max_samples 1000
+"""
 
 import argparse
 import json
@@ -383,6 +403,180 @@ def calculate_psnr(img1, img2):
 
 
 # =============================================================================
+# Detection Metrics (mAP, Precision, Recall)
+# =============================================================================
+
+def calculate_iou(box1, box2):
+    """Calculate IoU between two boxes in [x1, y1, x2, y2] format"""
+    x1 = max(box1[0], box2[0])
+    y1 = max(box1[1], box2[1])
+    x2 = min(box1[2], box2[2])
+    y2 = min(box1[3], box2[3])
+    
+    inter = max(0, x2 - x1) * max(0, y2 - y1)
+    area1 = (box1[2] - box1[0]) * (box1[3] - box1[1])
+    area2 = (box2[2] - box2[0]) * (box2[3] - box2[1])
+    union = area1 + area2 - inter
+    
+    return inter / union if union > 0 else 0
+
+
+def xywh_to_xyxy(box, img_w, img_h):
+    """Convert YOLO format [x_center, y_center, w, h] (normalized) to [x1, y1, x2, y2] (pixels)"""
+    x_center, y_center, w, h = box
+    x1 = (x_center - w / 2) * img_w
+    y1 = (y_center - h / 2) * img_h
+    x2 = (x_center + w / 2) * img_w
+    y2 = (y_center + h / 2) * img_h
+    return [x1, y1, x2, y2]
+
+
+def load_gt_labels(label_path, img_w, img_h):
+    """Load ground truth labels from YOLO format file"""
+    boxes = []
+    if label_path.exists() and label_path.stat().st_size > 0:
+        with open(label_path, 'r') as f:
+            for line in f:
+                parts = line.strip().split()
+                if len(parts) >= 5:
+                    cls = int(parts[0])
+                    xywh = [float(x) for x in parts[1:5]]
+                    xyxy = xywh_to_xyxy(xywh, img_w, img_h)
+                    boxes.append({'class': cls, 'box': xyxy})
+    return boxes
+
+
+def load_pred_labels(pred_path, img_w, img_h):
+    """Load prediction labels from YOLO format file with confidence"""
+    boxes = []
+    if pred_path.exists() and pred_path.stat().st_size > 0:
+        with open(pred_path, 'r') as f:
+            for line in f:
+                parts = line.strip().split()
+                if len(parts) >= 6:
+                    cls = int(parts[0])
+                    xywh = [float(x) for x in parts[1:5]]
+                    conf = float(parts[5])
+                    xyxy = xywh_to_xyxy(xywh, img_w, img_h)
+                    boxes.append({'class': cls, 'box': xyxy, 'conf': conf})
+    return sorted(boxes, key=lambda x: x['conf'], reverse=True)
+
+
+def calculate_ap(precisions, recalls):
+    """COCO-style AP (All-point interpolation) - Ultralytics와 동일"""
+    if not precisions or not recalls:
+        return 0
+    
+    # Prepend sentinel values
+    precisions = [0] + list(precisions) + [0]
+    recalls = [0] + list(recalls) + [1]
+    
+    # Make precision monotonically decreasing
+    for i in range(len(precisions) - 2, -1, -1):
+        precisions[i] = max(precisions[i], precisions[i + 1])
+    
+    # Find points where recall changes
+    recall_changes = []
+    for i in range(1, len(recalls)):
+        if recalls[i] != recalls[i - 1]:
+            recall_changes.append(i)
+    
+    # Sum (recall[i] - recall[i-1]) * precision[i]
+    ap = 0
+    for i in recall_changes:
+        ap += (recalls[i] - recalls[i - 1]) * precisions[i]
+    
+    return ap
+
+
+def evaluate_detections(gt_dir, pred_dir, img_size=(768, 768), iou_threshold=0.5):
+    """Calculate mAP, Precision, Recall for detection results"""
+    
+    all_tp = 0
+    all_fp = 0
+    all_fn = 0
+    all_detections = []
+    all_gt_count = 0
+    
+    pred_files = sorted(pred_dir.glob('*.txt'))
+    
+    for pred_path in pred_files:
+        img_name = pred_path.stem
+        gt_path = gt_dir / f"{img_name}.txt"
+        
+        img_w, img_h = img_size
+        
+        gt_boxes = load_gt_labels(gt_path, img_w, img_h)
+        pred_boxes = load_pred_labels(pred_path, img_w, img_h)
+        
+        all_gt_count += len(gt_boxes)
+        gt_matched = [False] * len(gt_boxes)
+        
+        for pred in pred_boxes:
+            best_iou = 0
+            best_gt_idx = -1
+            
+            for gt_idx, gt in enumerate(gt_boxes):
+                if gt_matched[gt_idx]:
+                    continue
+                iou = calculate_iou(pred['box'], gt['box'])
+                if iou > best_iou:
+                    best_iou = iou
+                    best_gt_idx = gt_idx
+            
+            if best_iou >= iou_threshold and best_gt_idx >= 0:
+                gt_matched[best_gt_idx] = True
+                all_detections.append({'conf': pred['conf'], 'tp': 1})
+                all_tp += 1
+            else:
+                all_detections.append({'conf': pred['conf'], 'tp': 0})
+                all_fp += 1
+        
+        all_fn += sum(1 for m in gt_matched if not m)
+    
+    # Sort by confidence
+    all_detections = sorted(all_detections, key=lambda x: x['conf'], reverse=True)
+    
+    # Calculate precision-recall curve
+    precisions = []
+    recalls = []
+    tp_cumsum = 0
+    fp_cumsum = 0
+    
+    for det in all_detections:
+        if det['tp']:
+            tp_cumsum += 1
+        else:
+            fp_cumsum += 1
+        
+        precision = tp_cumsum / (tp_cumsum + fp_cumsum) if (tp_cumsum + fp_cumsum) > 0 else 0
+        recall = tp_cumsum / all_gt_count if all_gt_count > 0 else 0
+        
+        precisions.append(precision)
+        recalls.append(recall)
+    
+    # Calculate AP
+    ap = calculate_ap(precisions, recalls) if precisions else 0
+    
+    # Final metrics
+    precision = all_tp / (all_tp + all_fp) if (all_tp + all_fp) > 0 else 0
+    recall = all_tp / (all_tp + all_fn) if (all_tp + all_fn) > 0 else 0
+    f1 = 2 * precision * recall / (precision + recall) if (precision + recall) > 0 else 0
+    
+    return {
+        'mAP@0.5': ap,
+        'precision': precision,
+        'recall': recall,
+        'f1': f1,
+        'tp': all_tp,
+        'fp': all_fp,
+        'fn': all_fn,
+        'total_gt': all_gt_count,
+        'total_pred': all_tp + all_fp
+    }
+
+
+# =============================================================================
 # Arch0 Inference
 # =============================================================================
 
@@ -712,10 +906,49 @@ def main():
     analyze_gate(a2, output_dir)
     print_comparison(a0, a2)
     
+    # Detection Metrics (mAP, Precision, Recall)
+    print("\n" + "=" * 75)
+    print("📈 Detection Metrics (mAP, Precision, Recall, F1)")
+    print("=" * 75)
+    
+    gt_label_dir = Path(args.lr_root) / 'labels' / 'val'
+    
+    # Arch0 metrics
+    arch0_pred_dir = output_dir / 'arch0_predictions'
+    arch0_metrics = evaluate_detections(gt_label_dir, arch0_pred_dir, img_size=(768, 768))
+    
+    print(f"\n[Arch0 - Always SR]")
+    print(f"  mAP@0.5:    {arch0_metrics['mAP@0.5']:.4f}")
+    print(f"  Precision:  {arch0_metrics['precision']:.4f}")
+    print(f"  Recall:     {arch0_metrics['recall']:.4f}")
+    print(f"  F1 Score:   {arch0_metrics['f1']:.4f}")
+    print(f"  TP/FP/FN:   {arch0_metrics['tp']}/{arch0_metrics['fp']}/{arch0_metrics['fn']}")
+    
+    # Arch2 metrics
+    arch2_pred_dir = output_dir / 'arch2_predictions'
+    arch2_metrics = evaluate_detections(gt_label_dir, arch2_pred_dir, img_size=(768, 768))
+    
+    print(f"\n[Arch2 - SoftGate]")
+    print(f"  mAP@0.5:    {arch2_metrics['mAP@0.5']:.4f}")
+    print(f"  Precision:  {arch2_metrics['precision']:.4f}")
+    print(f"  Recall:     {arch2_metrics['recall']:.4f}")
+    print(f"  F1 Score:   {arch2_metrics['f1']:.4f}")
+    print(f"  TP/FP/FN:   {arch2_metrics['tp']}/{arch2_metrics['fp']}/{arch2_metrics['fn']}")
+    
+    # Comparison table
+    print(f"\n{'Metric':<15} {'Arch0':<12} {'Arch2':<12} {'Diff':<12}")
+    print("-" * 50)
+    print(f"{'mAP@0.5':<15} {arch0_metrics['mAP@0.5']:.4f}{'':<6} {arch2_metrics['mAP@0.5']:.4f}{'':<6} {arch2_metrics['mAP@0.5']-arch0_metrics['mAP@0.5']:+.4f}")
+    print(f"{'Precision':<15} {arch0_metrics['precision']:.4f}{'':<6} {arch2_metrics['precision']:.4f}{'':<6} {arch2_metrics['precision']-arch0_metrics['precision']:+.4f}")
+    print(f"{'Recall':<15} {arch0_metrics['recall']:.4f}{'':<6} {arch2_metrics['recall']:.4f}{'':<6} {arch2_metrics['recall']-arch0_metrics['recall']:+.4f}")
+    print(f"{'F1 Score':<15} {arch0_metrics['f1']:.4f}{'':<6} {arch2_metrics['f1']:.4f}{'':<6} {arch2_metrics['f1']-arch0_metrics['f1']:+.4f}")
+    
     # Save
     summary = {
         'arch0': {k: v for k, v in a0.items() if k != 'detections'},
         'arch2': {k: v for k, v in a2.items() if k not in ['detections', 'gate_values', 'sr_applied']},
+        'arch0_metrics': arch0_metrics,
+        'arch2_metrics': arch2_metrics,
         'settings': vars(args)
     }
     with open(output_dir / 'comparison_results.json', 'w') as f:
