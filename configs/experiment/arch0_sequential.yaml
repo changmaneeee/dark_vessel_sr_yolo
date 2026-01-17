@@ -1,10 +1,19 @@
 # Architecture 0: Sequential Pipeline (Baseline)
 # LR → SR → HR → Detection
-# 가장 간단한 2-stage 접근법
 
-# Base config 상속
 defaults:
   - ../default.yaml
+
+data:
+  hr_root: "/home/changmin/smart_airbus_data"
+  hr_val_images: "/home/changmin/smart_airbus_data/images/val"
+  hr_val_labels: "/home/changmin/smart_airbus_data/labels/val"
+  
+  lr_root: "/home/changmin/smart_airbus_data_lr"
+  lr_val_images: "/home/changmin/smart_airbus_data_lr/images/val"
+  lr_val_labels: "/home/changmin/smart_airbus_data_lr/labels/val"
+  
+  scale_factor: 4
 
 experiment:
   name: "arch0_sequential_baseline"
@@ -17,14 +26,24 @@ model:
   sr_model: "rfdn"
   detector: "yolov8n"
 
+  # ★★★ Weights 경로 명시 ★★★
+  weights:
+    sr_model: "weights/rfdn/model_best.pt"
+    detector: "weights/yolohr/8s/best.pt"
+
+  # ★★★ SR 설정 (0-255 범위) ★★★
+  sr_config:
+    input_range: "0-255"
+    nf: 50
+    scale: 4
+
   # Sequential 특화 옵션
   arch0:
-    detach_sr: true  # SR과 Detection 간 gradient 차단
-    use_hr_gt: false  # HR GT 사용 여부 (available한 경우)
+    detach_sr: true
+    use_hr_gt: false
 
 # Training strategy
 training:
-  # Phase 1: SR 모델만 학습
   phases:
     - name: "sr_only"
       epochs: 100
@@ -33,7 +52,6 @@ training:
         sr_alpha: 1.0
         det_beta: 0.0
 
-    # Phase 2: SR 고정, Detector 학습
     - name: "detector_only"
       epochs: 150
       freeze_sr: true
@@ -41,7 +59,6 @@ training:
         sr_alpha: 0.0
         det_beta: 1.0
 
-    # Phase 3: Joint fine-tuning (선택적)
     - name: "joint_finetune"
       epochs: 50
       freeze_sr: false
@@ -52,21 +69,18 @@ training:
 
 # Evaluation
 evaluation:
-  # SR 품질 측정
   measure_sr_quality: true
   sr_metrics:
     - "PSNR"
     - "SSIM"
     - "LPIPS"
 
-  # Detection 성능 측정
   detection_metrics:
     - "mAP@0.5"
     - "mAP@0.75"
     - "Recall"
     - "Precision"
 
-# Expected characteristics
 expected_performance:
   pros:
     - "SR 품질 높음 (dedicated training)"
@@ -77,3 +91,4 @@ expected_performance:
     - "Latency 높음 (2-pass)"
     - "SR 오류가 Detection에 전파"
     - "메모리 사용량 큼 (HR 이미지 저장)"
+

@@ -8,11 +8,14 @@ arch0_sequential.py - Architecture 0: Sequential Pipeline
 
 [수정 내역]
 - compute_loss: detector.detection_model.model() → detector() wrapper 사용
+- RFDN weights 로드 추가
+- input_range 설정 추가
 """
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from typing import Dict, Any, Optional, Tuple
+from pathlib import Path
 from src.models.pipelines.base_pipeline import BasePipeline
 from src.models.sr_models.rfdn import RFDN
 from src.models.detectors.yolo_wrapper import YOLOWrapper
@@ -48,17 +51,32 @@ class Arch0Sequential(BasePipeline):
         
         # Data 설정
         self.upscale_factor = get_val(data_config, 'upscale_factor', 4)
+        if self.upscale_factor is None:
+            self.upscale_factor = get_val(data_config, 'scale_factor', 4)
         
         # SR 타입 결정
-        self.sr_type = get_val(model_config, 'sr_type', 'rfdn').lower()
+        self.sr_type = get_val(model_config, 'sr_model', 'rfdn').lower()
+        if self.sr_type is None:
+            self.sr_type = get_val(model_config, 'sr_type', 'rfdn').lower()
         
         if self.sr_type not in self.SUPPORTED_SR_TYPES:
             print(f"[Arch0] ⚠️ Unknown SR type '{self.sr_type}', falling back to RFDN")
             self.sr_type = 'rfdn'
         
+        # ★★★ Weights 경로 읽기 ★★★
+        weights_config = get_val(model_config, 'weights', SimpleNamespace())
+        self.sr_weights_path = get_val(weights_config, 'sr_model', None)
+        self.detector_weights_path = get_val(weights_config, 'detector', None)
+        
+        # ★★★ SR Config 읽기 ★★★
+        sr_config = get_val(model_config, 'sr_config', SimpleNamespace())
+        self.sr_input_range = get_val(sr_config, 'input_range', '0-255')
+        
         # YOLO 설정
         yolo_config = get_val(model_config, 'yolo', SimpleNamespace())
-        self.yolo_weights = get_val(yolo_config, 'weights_path', 'yolov8n.pt')
+        self.yolo_weights = get_val(yolo_config, 'weights_path', None)
+        if self.yolo_weights is None:
+            self.yolo_weights = self.detector_weights_path or 'yolov8n.pt'
         self.num_classes = get_val(yolo_config, 'num_classes', 1)
         
         # Training 설정
@@ -97,12 +115,16 @@ class Arch0Sequential(BasePipeline):
         trainable_params = sum(p.numel() for p in self.parameters() if p.requires_grad)
         print(f"\n[Arch0] Model Summary:")
         print(f"  - SR Model: {self.sr_type.upper()}")
+        print(f"  - SR Input Range: {self.sr_input_range}")
         print(f"  - Total parameters: {total_params:,}")
         print(f"  - Trainable parameters: {trainable_params:,}")
     
     def _init_rfdn_sr(self, model_config):
-        """RFDN 초기화"""
+        """RFDN 초기화 + Weights 로드"""
+        # RFDN config
         rfdn_config = getattr(model_config, 'rfdn', {})
+        sr_config = getattr(model_config, 'sr_config', {})
+        
         if isinstance(rfdn_config, dict):
             self.nf = rfdn_config.get('nf', 50)
             self.num_modules = rfdn_config.get('num_modules', 4)
@@ -110,13 +132,57 @@ class Arch0Sequential(BasePipeline):
             self.nf = getattr(rfdn_config, 'nf', 50)
             self.num_modules = getattr(rfdn_config, 'num_modules', 4)
         
+        # sr_config에서도 nf 확인
+        if isinstance(sr_config, dict):
+            self.nf = sr_config.get('nf', self.nf)
+        elif hasattr(sr_config, 'nf'):
+            self.nf = getattr(sr_config, 'nf', self.nf)
+        
+        # ★★★ RFDN 생성 (input_range 설정) ★★★
+        # 학습된 weights가 0-255 범위이므로 input_range='0-255' 사용
+        # Pipeline에서 스케일링 처리하므로 내부 스케일링 비활성화
         self.sr_model = RFDN(
             in_channels=3,
             out_channels=3,
             nf=self.nf,
             num_modules=self.num_modules,
-            upscale=self.upscale_factor
+            upscale=self.upscale_factor,
+            input_range='0-255'  # ★ 내부 스케일링 비활성화
         )
+        
+        # ★★★ Weights 로드 ★★★
+        if self.sr_weights_path and Path(self.sr_weights_path).exists():
+            print(f"[Arch0] Loading RFDN weights: {self.sr_weights_path}")
+            checkpoint = torch.load(self.sr_weights_path, map_location='cpu')
+            
+            # state_dict 추출
+            if isinstance(checkpoint, dict):
+                if 'model_state_dict' in checkpoint:
+                    state_dict = checkpoint['model_state_dict']
+                elif 'state_dict' in checkpoint:
+                    state_dict = checkpoint['state_dict']
+                elif 'params_ema' in checkpoint:
+                    state_dict = checkpoint['params_ema']
+                elif 'params' in checkpoint:
+                    state_dict = checkpoint['params']
+                else:
+                    state_dict = checkpoint
+            else:
+                state_dict = checkpoint
+            
+            # 로드
+            try:
+                self.sr_model.load_state_dict(state_dict, strict=True)
+                print(f"[Arch0] ✓ RFDN weights loaded successfully")
+            except Exception as e:
+                print(f"[Arch0] ⚠️ RFDN weights load failed: {e}")
+                try:
+                    self.sr_model.load_state_dict(state_dict, strict=False)
+                    print(f"[Arch0] ✓ RFDN weights loaded (strict=False)")
+                except Exception as e2:
+                    print(f"[Arch0] ❌ RFDN weights load failed completely: {e2}")
+        else:
+            print(f"[Arch0] ⚠️ RFDN weights not found: {self.sr_weights_path}")
     
     def _init_mamba_sr(self, model_config):
         """MambaSR 초기화"""
@@ -152,15 +218,16 @@ class Arch0Sequential(BasePipeline):
         )
     
     def forward(self, lr_image: torch.Tensor) -> Tuple[torch.Tensor, Any]:
-        """LR → SR → YOLO"""
-        sr_image = self.sr_model(lr_image)
+        """LR → SR → YOLO (학습용)"""
+        # ★ 학습 시에도 스케일링 처리 ★
+        lr_255 = lr_image * 255.0
+        sr_255 = self.sr_model(lr_255)
+        sr_image = torch.clamp(sr_255 / 255.0, 0.0, 1.0)
         
         if self.training:
-            # 학습 모드: raw predictions 반환
             self.detector.train()
             detections = self.detector(sr_image)
         else:
-            # 추론 모드: decoded predictions 반환
             self.detector.eval()
             detections = self.detector.predict(sr_image)
         
@@ -172,11 +239,7 @@ class Arch0Sequential(BasePipeline):
         targets: torch.Tensor,
         hr_gt: Optional[torch.Tensor] = None
     ) -> Dict[str, torch.Tensor]:
-        """
-        Loss 계산
-        
-        [수정됨] detector.detection_model.model() 대신 detector() 사용
-        """
+        """Loss 계산"""
         sr_image, _ = outputs
         device = sr_image.device
         
@@ -196,7 +259,6 @@ class Arch0Sequential(BasePipeline):
         
         # Detection Loss 계산
         if targets is not None and len(targets) > 0:
-            # [핵심 수정] wrapper를 통해 forward 호출
             self.detector.train()
             preds = self.detector(sr_image)
             det_loss_dict = self.detection_loss_fn(preds, targets, sr_image)
@@ -225,7 +287,17 @@ class Arch0Sequential(BasePipeline):
         """추론 모드"""
         self.eval()
         
-        sr_image = self.sr_model(lr_image)
+        # ★ Pipeline에서 스케일링 처리 ★
+        # 1. 0~1 → 0~255
+        lr_255 = lr_image * 255.0
+        
+        # 2. RFDN (0~255 → 0~255)
+        sr_255 = self.sr_model(lr_255)
+        
+        # 3. 0~255 → 0~1 + clamp
+        sr_image = torch.clamp(sr_255 / 255.0, 0.0, 1.0)
+        
+        # 4. Detection
         detections = self.detector.predict(sr_image, conf=conf_threshold, iou=iou_threshold)
         
         return {
@@ -249,6 +321,8 @@ class Arch0Sequential(BasePipeline):
         info.update({
             'architecture': 'Arch0_Sequential',
             'sr_type': self.sr_type,
+            'sr_input_range': self.sr_input_range,
+            'sr_weights': self.sr_weights_path,
         })
         return info
 

@@ -1,43 +1,56 @@
 # Architecture 2: Soft Gate Network
-# LR과 SR feature를 Soft Gate로 혼합
-# 연산 효율성과 성능의 균형
 
-# Base config 상속
 defaults:
   - ../default.yaml
+
+data:
+  hr_root: "/home/changmin/smart_airbus_data"
+  hr_val_images: "/home/changmin/smart_airbus_data/images/val"
+  hr_val_labels: "/home/changmin/smart_airbus_data/labels/val"
+    
+  lr_root: "/home/changmin/smart_airbus_data_lr"
+  lr_val_images: "/home/changmin/smart_airbus_data_lr/images/val"
+  lr_val_labels: "/home/changmin/smart_airbus_data_lr/labels/val"
+    
+  scale_factor: 4
+
 
 experiment:
   name: "arch2_softgate"
   description: "Soft gate fusion between LR and SR features"
   architecture: "arch2"
 
-# Architecture 특화 설정
 model:
   pipeline: "arch2_softgate"
   sr_model: "rfdn"
   detector: "yolov8n"
   fusion_method: "softgate"
 
+  # ★★★ Weights 경로 명시 ★★★
+  weights:
+    sr_model: "weights/rfdn/model_best.pt"
+    detector: "weights/yolohr/8s/best.pt"
+
+  # ★★★ SR 설정 (0-255 범위) ★★★
+  sr_config:
+    input_range: "0-255"
+    nf: 50
+    scale: 4
+
   # Soft Gate 옵션
   arch2:
     gate_hidden_dim: 256
-    gate_activation: "sigmoid"  # sigmoid, tanh
-    temperature: 1.0  # Gating temperature
-
-    # Feature extraction points
-    lr_feature_layer: "backbone.stage3"  # YOLO backbone layer
-    sr_feature_layer: "encoder.final"    # SR encoder output
-
-    # Gate network architecture
+    gate_activation: "sigmoid"
+    temperature: 1.0
+    lr_feature_layer: "backbone.stage3"
+    sr_feature_layer: "encoder.final"
     gate_layers: 2
     gate_dropout: 0.1
 
-# Training strategy
 training:
   epochs: 300
   batch_size: 8
 
-  # 3-phase training
   phases:
     - name: "pretrain_sr"
       epochs: 50
@@ -55,7 +68,7 @@ training:
       loss_weights:
         sr_alpha: 0.5
         det_beta: 0.5
-        gate_reg: 0.01  # Gate entropy regularization
+        gate_reg: 0.01
 
     - name: "finetune_detector"
       epochs: 50
@@ -66,33 +79,27 @@ training:
         det_beta: 1.0
         gate_reg: 0.0
 
-# Gate-specific loss
 losses:
   gate_regularization:
-    type: "entropy"  # Encourage decisive gating
+    type: "entropy"
     weight: 0.01
 
-  # Feature alignment loss
   feature_alignment:
     type: "cosine"
     weight: 0.05
 
-# Evaluation
 evaluation:
-  # Gate 분석
   analyze_gate_values: true
   gate_analysis:
     save_histograms: true
     visualize_gate_maps: true
 
-  # Performance metrics
   metrics:
     - "mAP@0.5"
     - "mAP@0.75"
     - "Inference_Time"
     - "FLOPs"
 
-# Expected characteristics
 expected_performance:
   pros:
     - "LR과 SR의 adaptive 혼합"
@@ -105,4 +112,5 @@ expected_performance:
 
   target_metrics:
     mAP_05: 0.65
-    latency_ms: 80  # Jetson Xavier NX
+    latency_ms: 80
+

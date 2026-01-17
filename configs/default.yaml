@@ -1,5 +1,4 @@
 # AIS-SAT-PIPELINE 기본 설정
-# 모든 실험의 베이스 설정
 
 experiment:
   name: "ais-sat-baseline"
@@ -10,30 +9,70 @@ experiment:
 
 # 모델 구성
 model:
-  sr_model: "rfdn"  # rfdn, mamba_sr, ttst
-  detector: "yolov8n"  # yolov8n, yolov8s, yolov8m
-  fusion_method: "attention"  # attention, gate, adaptive
+  sr_model: "rfdn"
+  detector: "yolov8n"
+  fusion_method: "attention"
   scale_factor: 4
+  
+  # Weights 경로
+  weights:
+    sr_model: "weights/rfdn/model_best.pt"
+    detector: "weights/yolohr/8s/best.pt"
+  
+  # SR 모델 설정
+  sr_config:
+    input_range: "0-255"
+    nf: 50
+    scale: 4
+
+# ★★★ 데이터 경로 (실제 경로) ★★★
+data:
+  # HR 데이터
+  hr_root: "/home/changmin/smart_airbus_data"
+  hr_train_images: "/home/changmin/smart_airbus_data/images/train"
+  hr_train_labels: "/home/changmin/smart_airbus_data/labels/train"
+  hr_val_images: "/home/changmin/smart_airbus_data/images/val"
+  hr_val_labels: "/home/changmin/smart_airbus_data/labels/val"
+  hr_data_yaml: "/home/changmin/smart_airbus_data/data.yaml"
+  
+  # LR 데이터
+  lr_root: "/home/changmin/smart_airbus_data_lr"
+  lr_train_images: "/home/changmin/smart_airbus_data_lr/images/train"
+  lr_train_labels: "/home/changmin/smart_airbus_data_lr/labels/train"
+  lr_val_images: "/home/changmin/smart_airbus_data_lr/images/val"
+  lr_val_labels: "/home/changmin/smart_airbus_data_lr/labels/val"
+  lr_data_yaml: "/home/changmin/smart_airbus_data_lr/data.yaml"
+  
+  # 이미지 크기
+  hr_size: 768
+  lr_size: 192
+  scale_factor: 4
+
+  # Augmentation
+  augmentation:
+    horizontal_flip: true
+    vertical_flip: true
+    rotate_90: true
+    random_crop: true
+    mosaic: false
+    mixup: false
 
 # 학습 설정
 training:
   epochs: 300
   batch_size: 8
   num_workers: 4
-  accumulation_steps: 1  # Gradient accumulation
+  accumulation_steps: 1
 
-  # Learning rate
   lr: 1.0e-4
   weight_decay: 0.01
   grad_clip: 1.0
 
-  # Loss 가중치 (Phase별 스케줄링)
   loss_weights:
-    sr_alpha: 0.7      # SR loss weight
-    det_beta: 0.3      # Detection loss weight
-    feature_gamma: 0.0 # Feature matching loss (Arch5B 전용)
+    sr_alpha: 0.7
+    det_beta: 0.3
+    feature_gamma: 0.0
 
-  # Phase-based training schedule
   phases:
     - name: "warmup"
       epochs: 50
@@ -58,62 +97,25 @@ training:
 
 # Optimizer
 optimizer:
-  type: "AdamW"  # Adam, AdamW, SGD
+  type: "AdamW"
   betas: [0.9, 0.999]
   eps: 1.0e-8
 
-# Learning rate scheduler
+# Scheduler
 scheduler:
-  type: "CosineAnnealing"  # CosineAnnealing, MultiStep, Exponential
+  type: "CosineAnnealing"
   T_max: 300
   eta_min: 1.0e-6
   warmup_epochs: 10
   warmup_lr: 1.0e-6
-
-# Data 설정
-data:
-  # 이미지 크기
-  hr_size: 768      # HR patch size
-  lr_size: 192      # LR patch size (hr_size / scale_factor)
-  scale_factor: 4
-
-  # 데이터셋 경로 (paths.yaml에서 override)
-  train_hr_dir: "data/train/hr"
-  train_lr_dir: "data/train/lr"
-  train_labels_dir: "data/train/labels"
-
-  val_hr_dir: "data/val/hr"
-  val_lr_dir: "data/val/lr"
-  val_labels_dir: "data/val/labels"
-
-  # Augmentation
-  augmentation:
-    horizontal_flip: true
-    vertical_flip: true
-    rotate_90: true
-    random_crop: true
-    mosaic: false  # YOLO-style mosaic augmentation
-    mixup: false
-
-  # Degradation (LR 생성)
-  degradation:
-    method: "bicubic"  # bicubic, realistic, sensor_sim
-    noise_level: 0.0   # Gaussian noise std
-    blur_kernel_size: 7
-    jpeg_quality: 90
 
 # Detection 설정
 detection:
   conf_threshold: 0.25
   iou_threshold: 0.45
   max_det: 300
-
-  # Class names (VLEO ship detection)
   classes:
     - "ship"
-
-  # Anchor boxes (YOLO)
-  anchors: null  # Auto-computed by YOLO
 
 # Evaluation
 evaluation:
@@ -123,32 +125,23 @@ evaluation:
     - "Precision"
     - "Recall"
     - "F1"
-    - "PSNR"  # SR quality
-    - "SSIM"  # SR quality
+    - "PSNR"
+    - "SSIM"
 
-  val_interval: 5  # Validate every N epochs
+  val_interval: 5
   save_best: true
-  save_interval: 10  # Save checkpoint every N epochs
+  save_interval: 10
 
 # Logging
 logging:
   use_tensorboard: true
   use_wandb: false
-  wandb_project: "ais-sat-pipeline"
-  log_interval: 10  # Log every N batches
-
-  # Visualization
+  log_interval: 10
   visualize_samples: true
   num_vis_samples: 4
-  vis_interval: 20  # Visualize every N epochs
 
 # Hardware
 hardware:
-  use_amp: true  # Automatic Mixed Precision
-  use_ddp: false  # Distributed Data Parallel
+  use_amp: true
+  use_ddp: false
   num_gpus: 1
-
-  # Jetson Xavier NX profiling
-  profile_mode: false
-  measure_latency: false
-  measure_memory: false
