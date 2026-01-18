@@ -16,11 +16,11 @@ from typing import Dict, Any, Optional, Tuple, List
 from src.models.pipelines.base_pipeline import BasePipeline
 from src.models.sr_models.rfdn import RFDN
 from src.models.detectors.yolo_wrapper import YOLOWrapper
-from src.models.gates.soft_gate import LightweightGate
+from src.models.gates.soft_gate import LightweightGateV1
 from src.losses.detection_loss import DetectionLoss
 from src.losses.sr_loss import SRLoss
 from types import SimpleNamespace
-
+from pathlib import Path 
 
 def get_val(obj, key, default=None):
     """SimpleNamespace와 dict 모두 지원하는 값 추출 헬퍼"""
@@ -73,11 +73,23 @@ class Arch2SoftGate(BasePipeline):
         # Gate Network 생성
         # =====================================================================
         print(f"\n[Arch2] Initializing Gate Network...")
-        self.gate_network = LightweightGate(
-            in_channels=3,
-            base_channels=self.gate_basechannels,   
-            num_layers=self.gate_num_layers
+
+        self.gate_network = LightweightGateV1(
+            in_channels=get_val(gate_config, 'in_channels', 3),
+            base_channels=get_val(gate_config, 'base_channels', 32),
+            num_layers=get_val(gate_config, 'num_layers', 4)
         )
+        
+        # Gate weights 로드
+        gate_weights_path = get_val(gate_config, 'weights_path', None)
+        if gate_weights_path and Path(gate_weights_path).exists():
+            ckpt = torch.load(gate_weights_path, map_location='cpu', weights_only=False)
+            self.gate_network.load_state_dict(ckpt['model_state_dict'])
+            print(f"[Arch2] ✓ Gate weights loaded: {gate_weights_path}")
+        else:
+            print(f"[Arch2] ⚠️ Gate weights not found, using random init")
+
+
 
         # =====================================================================
         # SR 모델 생성
@@ -199,8 +211,10 @@ class Arch2SoftGate(BasePipeline):
         # 1. Gate 예측
         gate = self.gate_network(lr_image)
 
-        # 2. SR 수행
-        sr_image = self.sr_model(lr_image)
+        # 2. SR 모델 적용
+        lr_255 = lr_image * 255.0
+        sr_255 = self.sr_model(lr_255)
+        sr_image = torch.clamp(sr_255 / 255.0, 0.0, 1.0)
         
         # 3. 단순 업샘플 (bypass path)
         upsampled = F.interpolate(

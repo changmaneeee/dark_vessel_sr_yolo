@@ -6,111 +6,44 @@ defaults:
 data:
   hr_root: "/home/changmin/smart_airbus_data"
   hr_val_images: "/home/changmin/smart_airbus_data/images/val"
-  hr_val_labels: "/home/changmin/smart_airbus_data/labels/val"
-    
   lr_root: "/home/changmin/smart_airbus_data_lr"
   lr_val_images: "/home/changmin/smart_airbus_data_lr/images/val"
-  lr_val_labels: "/home/changmin/smart_airbus_data_lr/labels/val"
-    
   scale_factor: 4
-
+  upscale_factor: 4
 
 experiment:
   name: "arch2_softgate"
-  description: "Soft gate fusion between LR and SR features"
   architecture: "arch2"
 
 model:
   pipeline: "arch2_softgate"
-  sr_model: "rfdn"
-  detector: "yolov8n"
-  fusion_method: "softgate"
-
-  # ★★★ Weights 경로 명시 ★★★
-  weights:
-    sr_model: "weights/rfdn/model_best.pt"
-    detector: "weights/yolohr/8s/best.pt"
-
-  # ★★★ SR 설정 (0-255 범위) ★★★
-  sr_config:
-    input_range: "0-255"
+  sr_type: "rfdn"
+  
+  # ★★★ RFDN 설정 ★★★
+  rfdn:
     nf: 50
-    scale: 4
-
-  # Soft Gate 옵션
-  arch2:
-    gate_hidden_dim: 256
-    gate_activation: "sigmoid"
-    temperature: 1.0
-    lr_feature_layer: "backbone.stage3"
-    sr_feature_layer: "encoder.final"
-    gate_layers: 2
-    gate_dropout: 0.1
+    num_modules: 4
+    pretrain_path: "weights/rfdn/model_best.pt"
+  
+  # ★★★ YOLO 설정 ★★★
+  yolo:
+    weights_path: "weights/yolohr/8s/best.pt"
+    num_classes: 1
+  
+  # ★★★ Gate 설정 ★★★
+  gate:
+    base_channels: 32
+    num_layers: 4
+    weights_path: "training/gate_arch2/checkpoints/gate_gt/gate_best.pt"
 
 training:
   epochs: 300
   batch_size: 8
-
-  phases:
-    - name: "pretrain_sr"
-      epochs: 50
-      freeze_detector: true
-      freeze_gate: true
-      loss_weights:
-        sr_alpha: 1.0
-        det_beta: 0.0
-        gate_reg: 0.0
-
-    - name: "joint_training"
-      epochs: 200
-      freeze_detector: false
-      freeze_gate: false
-      loss_weights:
-        sr_alpha: 0.5
-        det_beta: 0.5
-        gate_reg: 0.01
-
-    - name: "finetune_detector"
-      epochs: 50
-      freeze_sr: true
-      freeze_gate: true
-      loss_weights:
-        sr_alpha: 0.0
-        det_beta: 1.0
-        gate_reg: 0.0
 
 losses:
   gate_regularization:
     type: "entropy"
     weight: 0.01
 
-  feature_alignment:
-    type: "cosine"
-    weight: 0.05
-
 evaluation:
   analyze_gate_values: true
-  gate_analysis:
-    save_histograms: true
-    visualize_gate_maps: true
-
-  metrics:
-    - "mAP@0.5"
-    - "mAP@0.75"
-    - "Inference_Time"
-    - "FLOPs"
-
-expected_performance:
-  pros:
-    - "LR과 SR의 adaptive 혼합"
-    - "연산 효율성 (partial SR)"
-    - "Latency 감소"
-
-  cons:
-    - "Gate network 학습 필요"
-    - "SR 품질 저하 가능"
-
-  target_metrics:
-    mAP_05: 0.65
-    latency_ms: 80
-

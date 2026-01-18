@@ -350,6 +350,55 @@ class SoftGateModule(nn.Module):
             'upsampled': upsampled,
             'gate_expanded': gate_expanded
         }
+# =============================================================================
+# Lightweight Gate Network V1 - train_gate.py와 호환 (~50K params)
+# =============================================================================
+
+class LightweightGateV1(nn.Module):
+    """
+    학습된 Gate와 호환되는 버전 (train_gate.py와 동일 구조)
+    """
+    
+    def __init__(self, in_channels: int = 3, base_channels: int = 32, num_layers: int = 4):
+        super().__init__()
+        
+        self.features = nn.Sequential(
+            nn.Conv2d(in_channels, base_channels, 3, stride=2, padding=1),
+            nn.BatchNorm2d(base_channels),
+            nn.ReLU(inplace=True),
+            
+            nn.Conv2d(base_channels, base_channels * 2, 3, stride=2, padding=1),
+            nn.BatchNorm2d(base_channels * 2),
+            nn.ReLU(inplace=True),
+            
+            nn.Conv2d(base_channels * 2, base_channels * 4, 3, stride=2, padding=1),
+            nn.BatchNorm2d(base_channels * 4),
+            nn.ReLU(inplace=True),
+            
+            nn.Conv2d(base_channels * 4, base_channels * 4, 3, stride=2, padding=1),
+            nn.BatchNorm2d(base_channels * 4),
+            nn.ReLU(inplace=True),
+        )
+        
+        self.gap = nn.AdaptiveAvgPool2d(1)
+        
+        self.classifier = nn.Sequential(
+            nn.Linear(base_channels * 4, base_channels * 2),
+            nn.ReLU(inplace=True),
+            nn.Dropout(0.3),
+            nn.Linear(base_channels * 2, 1),
+        )
+        
+        total_params = sum(p.numel() for p in self.parameters())
+        print(f"[LightweightGateV1] Parameters: {total_params:,}")
+    
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        feat = self.features(x)
+        feat = self.gap(feat)
+        feat = feat.view(feat.size(0), -1)
+        out = self.classifier(feat)
+        return torch.sigmoid(out)
+
 
 
 # =============================================================================
