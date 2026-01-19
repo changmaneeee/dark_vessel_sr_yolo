@@ -5,6 +5,9 @@ arch4_adaptive.py - Architecture 4: Adaptive 2-Pass Pipeline
 
 [수정 내역]
 - __init__ 끝에 self.to(self.device) 추가하여 device 불일치 해결
+- _init_rfdn_sr: RFDN weights 로드 로직 추가
+- forward: SR 호출 시 0-255 스케일링 추가
+- forward_train: SR 호출 시 0-255 스케일링 추가
 """
 
 import torch
@@ -12,6 +15,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from typing import Dict, Any, Optional, Tuple, List
 from torchvision.ops import nms, batched_nms
+from pathlib import Path
 
 from src.models.pipelines.base_pipeline import BasePipeline
 from src.models.sr_models.rfdn import RFDN
@@ -122,28 +126,65 @@ class Arch4Adaptive(BasePipeline):
     # =========================================================================
     
     def _init_rfdn_sr(self, model_config):
-        """RFDN 초기화"""
+        """RFDN 초기화 + Weights 로드 (Arch0와 동일한 방식)"""
         rfdn_config = getattr(model_config, 'rfdn', {})
         if isinstance(rfdn_config, dict):
             self.nf = rfdn_config.get('nf', 50)
             self.num_modules = rfdn_config.get('num_modules', 4)
-            pretrain_path = rfdn_config.get('pretrain_path', None)
         else:
             self.nf = getattr(rfdn_config, 'nf', 50)
             self.num_modules = getattr(rfdn_config, 'num_modules', 4)
-            pretrain_path = getattr(rfdn_config, 'pretrain_path', None)
         
+        # ★★★ Weights 경로 읽기 ★★★
+        weights_config = getattr(model_config, 'weights', {})
+        if isinstance(weights_config, dict):
+            self.sr_weights_path = weights_config.get('sr_model', None)
+        else:
+            self.sr_weights_path = getattr(weights_config, 'sr_model', None)
+        
+        # ★★★ RFDN 생성 (input_range='0-255' 설정) ★★★
         self.sr_model = RFDN(
             in_channels=3,
             out_channels=3,
             nf=self.nf,
             num_modules=self.num_modules,
-            upscale=self.upscale_factor
+            upscale=self.upscale_factor,
+            input_range='0-255'  # ★ 내부 스케일링 비활성화 (Pipeline에서 처리)
         )
         
-        if pretrain_path:
-            self.sr_model.load_pretrained(pretrain_path)
-            print(f"[Arch4] RFDN pretrained 로드: {pretrain_path}")
+        # ★★★ Weights 로드 ★★★
+        if self.sr_weights_path and Path(self.sr_weights_path).exists():
+            print(f"[Arch4] Loading RFDN weights: {self.sr_weights_path}")
+            checkpoint = torch.load(self.sr_weights_path, map_location='cpu')
+            
+            # state_dict 추출
+            if isinstance(checkpoint, dict):
+                if 'model_state_dict' in checkpoint:
+                    state_dict = checkpoint['model_state_dict']
+                elif 'state_dict' in checkpoint:
+                    state_dict = checkpoint['state_dict']
+                elif 'params_ema' in checkpoint:
+                    state_dict = checkpoint['params_ema']
+                elif 'params' in checkpoint:
+                    state_dict = checkpoint['params']
+                else:
+                    state_dict = checkpoint
+            else:
+                state_dict = checkpoint
+            
+            # 로드
+            try:
+                self.sr_model.load_state_dict(state_dict, strict=True)
+                print(f"[Arch4] ✓ RFDN weights loaded successfully")
+            except Exception as e:
+                print(f"[Arch4] ⚠️ RFDN weights load failed (strict): {e}")
+                try:
+                    self.sr_model.load_state_dict(state_dict, strict=False)
+                    print(f"[Arch4] ✓ RFDN weights loaded (strict=False)")
+                except Exception as e2:
+                    print(f"[Arch4] ❌ RFDN weights load failed completely: {e2}")
+        else:
+            print(f"[Arch4] ⚠️ RFDN weights not found: {self.sr_weights_path}")
     
     def _init_mamba_sr(self, model_config):
         """MambaSR 초기화"""
@@ -259,6 +300,7 @@ class Arch4Adaptive(BasePipeline):
         self.eval()
         B = lr_image.size(0)
 
+        # Pass 1: LR upsampled로 빠른 탐지
         lr_upsampled = F.interpolate(
             lr_image,
             scale_factor=self.upscale_factor,
@@ -283,8 +325,17 @@ class Arch4Adaptive(BasePipeline):
         pass2_detections = [None] * B
 
         if any_needs_pass2:
-            hr_image = self.sr_model(lr_image)
+            # ★★★ 핵심 수정: 스케일링 추가 (Arch0/Arch2와 동일) ★★★
+            # 1. 0~1 → 0~255
+            lr_255 = lr_image * 255.0
+            
+            # 2. RFDN (0~255 → 0~255)
+            hr_255 = self.sr_model(lr_255)
+            
+            # 3. 0~255 → 0~1 + clamp
+            hr_image = torch.clamp(hr_255 / 255.0, 0.0, 1.0)
 
+            # Pass 2: SR 이미지로 재탐지
             pass2_results = self.detector.predict(
                 hr_image,
                 conf=self.low_conf_threshold,
@@ -295,6 +346,7 @@ class Arch4Adaptive(BasePipeline):
                 if needs:
                     pass2_detections[i] = pass2_results[i]
 
+        # 결과 병합
         final_detections = []
 
         for i in range(B):
@@ -343,7 +395,16 @@ class Arch4Adaptive(BasePipeline):
         """학습용 Forward"""
         self.train()
 
-        hr_image = self.sr_model(lr_image)
+        # ★★★ 핵심 수정: 스케일링 추가 (Arch0/Arch2와 동일) ★★★
+        # 1. 0~1 → 0~255
+        lr_255 = lr_image * 255.0
+        
+        # 2. RFDN (0~255 → 0~255)
+        hr_255 = self.sr_model(lr_255)
+        
+        # 3. 0~255 → 0~1 + clamp
+        hr_image = torch.clamp(hr_255 / 255.0, 0.0, 1.0)
+        
         lr_upsampled = F.interpolate(
             lr_image,
             scale_factor=self.upscale_factor,
