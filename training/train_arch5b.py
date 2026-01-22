@@ -109,8 +109,8 @@ def create_arch5b_model(
         ),
         data=SimpleNamespace(upscale_factor=4),
         training=SimpleNamespace(
-            sr_weight=0.3,
-            det_weight=0.7,
+            sr_weight=0,
+            det_weight=1,
             freeze_detector=True
         )
     )
@@ -182,48 +182,74 @@ class Arch5BTrainer:
         self.global_step = 0
     
     def _setup_trainable_params(self):
-        """학습 대상 파라미터 설정"""
-        mode = self.args.mode
-        
-        # 전체 freeze 먼저
-        for param in self.model.parameters():
-            param.requires_grad = False
-        
-        # Mode에 따라 unfreeze
-        if mode == 'scratch':
-            # Fusion 모듈 + SR 모델 학습
-            print("[Training] Mode: scratch")
-            print("  - Fusion module: trainable")
-            print("  - SR model: trainable")
-            print("  - YOLO: frozen")
+            """학습 대상 파라미터 설정 (안전장치 강화판)"""
+            mode = self.args.mode
             
-            # Fusion 모듈
-            if hasattr(self.model, 'fusion'):
-                for param in self.model.fusion.parameters():
-                    param.requires_grad = True
+            # 1. 일단 전체 동결 (초기화)
+            for param in self.model.parameters():
+                param.requires_grad = False
             
-            # SR 모델
-            if hasattr(self.model, 'sr_model'):
-                for param in self.model.sr_model.parameters():
-                    param.requires_grad = True
-        
-        elif mode == 'finetune':
-            # Fusion 모듈만 학습 (SR, YOLO는 이미 학습됨)
-            print("[Training] Mode: finetune")
-            print("  - Fusion module: trainable")
-            print("  - SR model: frozen (pretrained)")
-            print("  - YOLO: frozen (pretrained)")
+            # Mode에 따라 unfreeze
+            if mode == 'scratch':
+                print("[Training] Mode: scratch")
+                # Fusion 모듈
+                if hasattr(self.model, 'fusion'):
+                    for param in self.model.fusion.parameters():
+                        param.requires_grad = True
+                # SR 모델
+                if hasattr(self.model, 'sr_model'):
+                    for param in self.model.sr_model.parameters():
+                        param.requires_grad = True
+                
+            elif mode == 'finetune':
+                print("\n[Training Setup] Mode: finetune (Phase 2)")
+                
+                # 2. Fusion 모듈 Unfreeze
+                if hasattr(self.model, 'fusion'):
+                    for param in self.model.fusion.parameters():
+                        param.requires_grad = True
+                    print("  ✓ Fusion Module: Unfrozen (Trainable)")
+                else:
+                    print("  ⚠️ Warning: 'fusion' module not found!")
+
+                # 3. YOLO Head Unfreeze (경로 명시적 탐색 및 강제 해제)
+                try:
+                    # YOLOv8 구조상 Head 위치 찾기
+                    head = self.model.detector.detection_model.model[-1]
+                    for param in head.parameters():
+                        param.requires_grad = True
+                    print(f"  ✓ YOLO Head (Layer {head._get_name()}): Unfrozen (Trainable)")
+                except Exception as e:
+                    print(f"\n[CRITICAL ERROR] YOLO Head를 찾을 수 없습니다!")
+                    print(f"에러 내용: {e}")
+                    raise e
+
+                print("  - SR Model: Frozen (Fixed)")
+                print("  - YOLO Backbone: Frozen (Fixed)")
+
+            # 4. [검증] 학습 가능한 파라미터가 진짜로 존재하는지 확인
+            # (주의: 이 부분 들여쓰기가 def _setup_trainable_params와 같은 레벨이 아니라, 함수 내부여야 함)
+            trainable_params = list(filter(lambda p: p.requires_grad, self.model.parameters()))
+            num_trainable = sum(p.numel() for p in trainable_params)
             
-            # Fusion 모듈만
-            if hasattr(self.model, 'fusion'):
-                for param in self.model.fusion.parameters():
-                    param.requires_grad = True
-        
-        # 파라미터 수 출력
-        total = sum(p.numel() for p in self.model.parameters())
-        trainable = sum(p.numel() for p in self.model.parameters() if p.requires_grad)
-        print(f"  - Total params: {total:,}")
-        print(f"  - Trainable params: {trainable:,}")
+            print(f"\n[검증] 총 학습 가능한 파라미터 수: {num_trainable:,}")
+            
+            if num_trainable == 0:
+                raise RuntimeError("학습 가능한 파라미터가 0개입니다! YOLO Head가 제대로 안 녹았습니다.")
+            else:
+                print(">>> 검증 완료: 학습 준비 끝. (Gradient Path 확보됨)\n")
+
+            # 4. [검증] 학습 가능한 파라미터가 진짜로 존재하는지 확인
+            trainable_params = list(filter(lambda p: p.requires_grad, self.model.parameters()))
+            num_trainable = sum(p.numel() for p in trainable_params)
+            
+            print(f"\n[검증] 총 학습 가능한 파라미터 수: {num_trainable:,}")
+            
+            if num_trainable == 0:
+                # 여기가 핵심! 0개면 바로 에러를 띄워서 멈춤
+                raise RuntimeError("학습 가능한 파라미터가 0개입니다! YOLO Head가 제대로 안 녹았습니다.")
+            else:
+                print(">>> 검증 완료: 학습 준비 끝. (Gradient Path 확보됨)\n")
     
     def train_epoch(self, epoch: int) -> Dict[str, float]:
         """한 에폭 학습"""
