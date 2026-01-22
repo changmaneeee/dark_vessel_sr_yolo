@@ -308,7 +308,7 @@ class MambaSR(nn.Module):
         depths: list = [5, 5, 5, 5],
         num_heads: list = [4, 4, 4, 4],
         window_size: int = 16,
-        pretrained_path: Optional[str] = "/home/octolab-rtx4090/Desktop/changmin/MambaIR/experiments/MambaIRv2_SmartAirbus/models/net_g_450000.pth",
+        pretrained_path: Optional[str] = None,
         **kwargs
     ):
         """
