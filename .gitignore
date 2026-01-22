@@ -16,7 +16,8 @@ pretrained/
 *.pt
 *.ckpt
 *.safetensors
-
+build_temp/
+Miniconda3-latest-Linux-x86_64.sh
 # Logs & Results
 logs/
 runs/
