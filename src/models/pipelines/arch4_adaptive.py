@@ -1,13 +1,12 @@
 """
 =============================================================================
-arch4_adaptive.py - Architecture 4: Adaptive 2-Pass Pipeline
+arch4_adaptive.py - Architecture 4: Adaptive 2-Pass Pipeline (Dual YOLO)
 =============================================================================
 
 [수정 내역]
-- __init__ 끝에 self.to(self.device) 추가하여 device 불일치 해결
-- _init_rfdn_sr: RFDN weights 로드 로직 추가
-- forward: SR 호출 시 0-255 스케일링 추가
-- forward_train: SR 호출 시 0-255 스케일링 추가
+- Dual YOLO 지원: Pass1(LR)용, Pass2(HR)용 별도 YOLO
+- SR 스케일링 수정 (0-255 범위)
+- RFDN weights 로드 추가
 """
 
 import torch
@@ -27,11 +26,16 @@ from types import SimpleNamespace
 
 class Arch4Adaptive(BasePipeline):
     """
-    Architecture 4: Adaptive 2-Pass Pipeline
+    Architecture 4: Adaptive 2-Pass Pipeline (Dual YOLO 지원)
     
     [지원 SR 모델]
     - RFDN (기본)
     - MambaSR
+    
+    [Dual YOLO]
+    - detector_lr: Pass1 (LR upsampled) 이미지용
+    - detector_hr: Pass2 (SR) 이미지용
+    - 같은 weights를 사용하면 기존과 동일
     """
 
     SUPPORTED_SR_TYPES = ['rfdn', 'mamba']
@@ -60,10 +64,18 @@ class Arch4Adaptive(BasePipeline):
             print(f"[Arch4] ⚠️ Unknown SR type '{self.sr_type}', falling back to RFDN")
             self.sr_type = 'rfdn'
 
-        # YOLO 설정
+        # YOLO 설정 (Dual YOLO 지원)
         yolo_config = get_val(model_config, 'yolo', SimpleNamespace())
-        self.yolo_weights = get_val(yolo_config, 'weights_path', 'yolov8n.pt')
+        self.yolo_weights_hr = get_val(yolo_config, 'weights_path', 'yolov8n.pt')
+        self.yolo_weights_lr = get_val(yolo_config, 'weights_path_lr', None)  # None이면 HR과 동일
         self.num_classes = get_val(yolo_config, 'num_classes', 1)
+        
+        # LR weights가 없으면 HR weights 사용
+        if self.yolo_weights_lr is None:
+            self.yolo_weights_lr = self.yolo_weights_hr
+            self.use_dual_yolo = False
+        else:
+            self.use_dual_yolo = True
 
         # Adaptive 설정
         adaptive_config = get_val(model_config, 'adaptive', SimpleNamespace())
@@ -83,20 +95,40 @@ class Arch4Adaptive(BasePipeline):
             self._init_rfdn_sr(model_config)
 
         # =====================================================================
-        # YOLO Detector 생성
+        # YOLO Detector 생성 (Dual YOLO)
         # =====================================================================
         print(f"[Arch4] Initializing YOLO...")
-        self.detector = YOLOWrapper(
-            model_path=self.yolo_weights,
+        
+        # HR용 YOLO (Pass2: SR 이미지)
+        self.detector_hr = YOLOWrapper(
+            model_path=self.yolo_weights_hr,
             num_classes=self.num_classes,
             device=self.device,
             verbose=False
         )
+        print(f"[Arch4] ✓ YOLO (HR/Pass2): {self.yolo_weights_hr}")
+        
+        # LR용 YOLO (Pass1: LR upsampled 이미지)
+        if self.use_dual_yolo:
+            self.detector_lr = YOLOWrapper(
+                model_path=self.yolo_weights_lr,
+                num_classes=self.num_classes,
+                device=self.device,
+                verbose=False
+            )
+            print(f"[Arch4] ✓ YOLO (LR/Pass1): {self.yolo_weights_lr}")
+        else:
+            # 같은 detector 공유
+            self.detector_lr = self.detector_hr
+            print(f"[Arch4] ✓ YOLO (공유): {self.yolo_weights_hr}")
+        
+        # 기존 호환성을 위한 alias
+        self.detector = self.detector_hr
 
         # =====================================================================
         # Loss Functions
         # =====================================================================
-        self.det_loss_fn = DetectionLoss(self.detector.detection_model)
+        self.det_loss_fn = DetectionLoss(self.detector_hr.detection_model)
         self.sr_loss_fn = SRLoss(l1_weight=1.0, charbonnier=True)
 
         # 통계 추적
@@ -105,19 +137,28 @@ class Arch4Adaptive(BasePipeline):
 
         # 모델 정보 출력
         sr_params = sum(p.numel() for p in self.sr_model.parameters())
-        yolo_params = sum(p.numel() for p in self.detector.detection_model.parameters())
-        total_params = sr_params + yolo_params
+        yolo_hr_params = sum(p.numel() for p in self.detector_hr.detection_model.parameters())
+        
+        if self.use_dual_yolo:
+            yolo_lr_params = sum(p.numel() for p in self.detector_lr.detection_model.parameters())
+            total_params = sr_params + yolo_hr_params + yolo_lr_params
+        else:
+            yolo_lr_params = 0
+            total_params = sr_params + yolo_hr_params
 
         print(f"\n[Arch4] ✓ Model initialized:")
         print(f"  - SR Model: {self.sr_type.upper()}")
         print(f"  - SR params: {sr_params:,}")
-        print(f"  - YOLO params: {yolo_params:,}")
+        print(f"  - YOLO HR params: {yolo_hr_params:,}")
+        if self.use_dual_yolo:
+            print(f"  - YOLO LR params: {yolo_lr_params:,}")
         print(f"  - Total params: {total_params:,}")
+        print(f"  - Dual YOLO: {self.use_dual_yolo}")
         print(f"  - Low conf threshold: {self.low_conf_threshold}")
         print(f"  - High conf threshold: {self.high_conf_threshold}")
         
         # =====================================================================
-        # [핵심 수정] 모든 모듈을 device로 이동
+        # 모든 모듈을 device로 이동
         # =====================================================================
         self.to(self.device)
 
@@ -126,7 +167,7 @@ class Arch4Adaptive(BasePipeline):
     # =========================================================================
     
     def _init_rfdn_sr(self, model_config):
-        """RFDN 초기화 + Weights 로드 (Arch0와 동일한 방식)"""
+        """RFDN 초기화 + Weights 로드"""
         rfdn_config = getattr(model_config, 'rfdn', {})
         if isinstance(rfdn_config, dict):
             self.nf = rfdn_config.get('nf', 50)
@@ -135,29 +176,28 @@ class Arch4Adaptive(BasePipeline):
             self.nf = getattr(rfdn_config, 'nf', 50)
             self.num_modules = getattr(rfdn_config, 'num_modules', 4)
         
-        # ★★★ Weights 경로 읽기 ★★★
+        # Weights 경로 읽기
         weights_config = getattr(model_config, 'weights', {})
         if isinstance(weights_config, dict):
             self.sr_weights_path = weights_config.get('sr_model', None)
         else:
             self.sr_weights_path = getattr(weights_config, 'sr_model', None)
         
-        # ★★★ RFDN 생성 (input_range='0-255' 설정) ★★★
+        # RFDN 생성 (input_range='0-255')
         self.sr_model = RFDN(
             in_channels=3,
             out_channels=3,
             nf=self.nf,
             num_modules=self.num_modules,
             upscale=self.upscale_factor,
-            input_range='0-255'  # ★ 내부 스케일링 비활성화 (Pipeline에서 처리)
+            input_range='0-255'
         )
         
-        # ★★★ Weights 로드 ★★★
+        # Weights 로드
         if self.sr_weights_path and Path(self.sr_weights_path).exists():
             print(f"[Arch4] Loading RFDN weights: {self.sr_weights_path}")
             checkpoint = torch.load(self.sr_weights_path, map_location='cpu')
             
-            # state_dict 추출
             if isinstance(checkpoint, dict):
                 if 'model_state_dict' in checkpoint:
                     state_dict = checkpoint['model_state_dict']
@@ -172,7 +212,6 @@ class Arch4Adaptive(BasePipeline):
             else:
                 state_dict = checkpoint
             
-            # 로드
             try:
                 self.sr_model.load_state_dict(state_dict, strict=True)
                 print(f"[Arch4] ✓ RFDN weights loaded successfully")
@@ -233,8 +272,10 @@ class Arch4Adaptive(BasePipeline):
             scores = det.get('scores', torch.tensor([]))
 
             if len(scores) == 0:
+                # 탐지된 객체가 없으면 Pass2 필요
                 needs_pass2.append(True)
             else:
+                # low_conf < score < high_conf 인 객체가 있으면 Pass2 필요
                 low_conf_mask = (scores > self.low_conf_threshold) & (scores < self.high_conf_threshold)
                 has_low_conf = low_conf_mask.any().item()
                 needs_pass2.append(has_low_conf)
@@ -296,11 +337,11 @@ class Arch4Adaptive(BasePipeline):
         lr_image: torch.Tensor,
         return_intermediate: bool = False
     ) -> Dict[str, Any]:
-        """추론용 Forward (2-Pass)"""
+        """추론용 Forward (2-Pass with Dual YOLO)"""
         self.eval()
         B = lr_image.size(0)
 
-        # Pass 1: LR upsampled로 빠른 탐지
+        # Pass 1: LR upsampled로 빠른 탐지 (YOLO_LR 사용)
         lr_upsampled = F.interpolate(
             lr_image,
             scale_factor=self.upscale_factor,
@@ -308,7 +349,7 @@ class Arch4Adaptive(BasePipeline):
             align_corners=False
         )
 
-        pass1_detections = self.detector.predict(
+        pass1_detections = self.detector_lr.predict(
             lr_upsampled,
             conf=self.low_conf_threshold,
             iou=0.45
@@ -325,18 +366,13 @@ class Arch4Adaptive(BasePipeline):
         pass2_detections = [None] * B
 
         if any_needs_pass2:
-            # ★★★ 핵심 수정: 스케일링 추가 (Arch0/Arch2와 동일) ★★★
-            # 1. 0~1 → 0~255
+            # SR 적용 (0-255 스케일링)
             lr_255 = lr_image * 255.0
-            
-            # 2. RFDN (0~255 → 0~255)
             hr_255 = self.sr_model(lr_255)
-            
-            # 3. 0~255 → 0~1 + clamp
             hr_image = torch.clamp(hr_255 / 255.0, 0.0, 1.0)
 
-            # Pass 2: SR 이미지로 재탐지
-            pass2_results = self.detector.predict(
+            # Pass 2: SR 이미지로 재탐지 (YOLO_HR 사용)
+            pass2_results = self.detector_hr.predict(
                 hr_image,
                 conf=self.low_conf_threshold,
                 iou=0.45
@@ -395,14 +431,9 @@ class Arch4Adaptive(BasePipeline):
         """학습용 Forward"""
         self.train()
 
-        # ★★★ 핵심 수정: 스케일링 추가 (Arch0/Arch2와 동일) ★★★
-        # 1. 0~1 → 0~255
+        # SR 적용 (0-255 스케일링)
         lr_255 = lr_image * 255.0
-        
-        # 2. RFDN (0~255 → 0~255)
         hr_255 = self.sr_model(lr_255)
-        
-        # 3. 0~255 → 0~1 + clamp
         hr_image = torch.clamp(hr_255 / 255.0, 0.0, 1.0)
         
         lr_upsampled = F.interpolate(
@@ -412,9 +443,11 @@ class Arch4Adaptive(BasePipeline):
             align_corners=False
         )
 
-        self.detector.train()
-        detections_hr = self.detector(hr_image)
-        detections_lr = self.detector(lr_upsampled)
+        self.detector_hr.train()
+        self.detector_lr.train()
+        
+        detections_hr = self.detector_hr(hr_image)
+        detections_lr = self.detector_lr(lr_upsampled)
 
         return {
             'hr_image': hr_image,
@@ -503,8 +536,11 @@ class Arch4Adaptive(BasePipeline):
     
     def freeze_yolo(self) -> None:
         """YOLO Freeze (SR만 학습)"""
-        self.detector.freeze()
-        self.detector.set_bn_eval()
+        self.detector_hr.freeze()
+        self.detector_hr.set_bn_eval()
+        if self.use_dual_yolo:
+            self.detector_lr.freeze()
+            self.detector_lr.set_bn_eval()
         
         for param in self.sr_model.parameters():
             param.requires_grad = True
@@ -516,7 +552,9 @@ class Arch4Adaptive(BasePipeline):
         for param in self.sr_model.parameters():
             param.requires_grad = False
         
-        self.detector.unfreeze()
+        self.detector_hr.unfreeze()
+        if self.use_dual_yolo:
+            self.detector_lr.unfreeze()
         
         print(f"[Arch4] SR ({self.sr_type}) frozen, YOLO trainable")
     
@@ -525,7 +563,9 @@ class Arch4Adaptive(BasePipeline):
         for param in self.sr_model.parameters():
             param.requires_grad = True
         
-        self.detector.unfreeze()
+        self.detector_hr.unfreeze()
+        if self.use_dual_yolo:
+            self.detector_lr.unfreeze()
         
         print("[Arch4] All trainable")
     
@@ -536,18 +576,27 @@ class Arch4Adaptive(BasePipeline):
         yolo_lr_scale: float = 0.1
     ) -> List[Dict]:
         """파라미터 그룹 반환"""
-        return [
+        groups = [
             {
                 'params': self.sr_model.parameters(),
                 'lr': base_lr * sr_lr_scale,
                 'name': 'sr'
             },
             {
-                'params': self.detector.detection_model.parameters(),
+                'params': self.detector_hr.detection_model.parameters(),
                 'lr': base_lr * yolo_lr_scale,
-                'name': 'yolo'
+                'name': 'yolo_hr'
             }
         ]
+        
+        if self.use_dual_yolo:
+            groups.append({
+                'params': self.detector_lr.detection_model.parameters(),
+                'lr': base_lr * yolo_lr_scale,
+                'name': 'yolo_lr'
+            })
+        
+        return groups
 
     # =========================================================================
     # Threshold Control
@@ -585,15 +634,17 @@ class Arch4Adaptive(BasePipeline):
         info = super().get_architecture_info()
         
         sr_params = sum(p.numel() for p in self.sr_model.parameters())
-        yolo_params = sum(p.numel() for p in self.detector.detection_model.parameters())
+        yolo_hr_params = sum(p.numel() for p in self.detector_hr.detection_model.parameters())
         
         info.update({
-            'architecture': 'Arch4_Adaptive_2Pass',
+            'architecture': 'Arch4_Adaptive_2Pass_DualYOLO',
             'sr_type': self.sr_type,
-            'description': 'Adaptive 2-pass detection with result merging',
+            'use_dual_yolo': self.use_dual_yolo,
+            'description': 'Adaptive 2-pass detection with dual YOLO support',
             'components': {
                 'sr_model': f'{self.sr_type.upper()} ({sr_params:,} params)',
-                'detector': f'YOLO ({yolo_params:,} params)'
+                'detector_hr': f'YOLO ({yolo_hr_params:,} params)',
+                'detector_lr': 'shared' if not self.use_dual_yolo else f'YOLO (separate)'
             },
             'thresholds': {
                 'low_conf': self.low_conf_threshold,
