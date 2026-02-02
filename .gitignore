@@ -8,6 +8,8 @@ weights/
 *.json
 *.h5
 *.hdf5
+yolo_results/
+result/
 
 # Checkpoints & Models
 checkpoints/

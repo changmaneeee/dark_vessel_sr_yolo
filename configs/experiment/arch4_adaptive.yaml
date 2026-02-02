@@ -1,41 +1,57 @@
-# Architecture 4: Confidence-Adaptive Pipeline
+# Architecture 4: Confidence-Adaptive Pipeline (Dual YOLO)
 
 defaults:
   - ../default.yaml
-
+  
 data:
-  hr_root: "/home/changmin/smart_airbus_data"
-  hr_val_images: "/home/changmin/smart_airbus_data/images/val"
-  hr_val_labels: "/home/changmin/smart_airbus_data/labels/val"
+  hr_root: "/home/jovyan/changmin/cv_ship_detact/datas/smart_airbus_dataset"
+  hr_val_images: "/home/jovyan/changmin/cv_ship_detact/datas/smart_airbus_dataset/images/val"
+  hr_val_labels: "/home/jovyan/changmin/cv_ship_detact/datas/smart_airbus_dataset/labels/val"
     
-  lr_root: "/home/changmin/smart_airbus_data_lr"
-  lr_val_images: "/home/changmin/smart_airbus_data_lr/images/val"
-  lr_val_labels: "/home/changmin/smart_airbus_data_lr/labels/val"
+  lr_root: "/home/jovyan/changmin/cv_ship_detact/datas/smart_airbus_dataset_lr"
+  lr_val_images: "/home/jovyan/changmin/cv_ship_detact/datas/smart_airbus_dataset_lr/images/val"
+  lr_val_labels: "/home/jovyan/changmin/cv_ship_detact/datas/smart_airbus_dataset_lr/labels/val"
     
   scale_factor: 4
+  upscale_factor: 4
 
 experiment:
   name: "arch4_confidence_adaptive"
-  description: "Confidence-based adaptive SR application"
+  description: "Confidence-based adaptive SR application with Dual YOLO"
   architecture: "arch4"
 
 model:
   pipeline: "arch4_adaptive"
-  sr_model: "rfdn"
-  detector: "yolov8n"
+  sr_type: "rfdn"
+  detector: "yolov8s"
 
-  # ★★★ Weights 경로 명시 ★★★
+  # ★★★ Weights 경로 (Dual YOLO 지원) ★★★
   weights:
-    sr_model: "weights/rfdn/model_best.pt"
-    detector: "weights/yolohr/8s/best.pt"
+    sr_model: "/home/jovyan/changmin/rfdn_model/experiment/rfdn_smart_airbus_final_fix/model/model_best.pt"
+    # 기존 단일 detector 호환용
+    detector: "/home/jovyan/changmin/yolov8s+HR_airbus_smartdata/weights/best.pt"
 
-  # ★★★ SR 설정 (0-255 범위) ★★★
-  sr_config:
-    input_range: "0-255"
+  # ★★★ YOLO 설정 (Dual YOLO) ★★★
+  yolo:
+    # HR용 YOLO - Pass2 (SR 이미지 탐지)
+    weights_path: "/home/jovyan/changmin/yolov8s+HR_airbus_smartdata/weights/best.pt"
+    # LR용 YOLO - Pass1 (LR upsampled 이미지 탐지)
+    weights_path_lr: "/home/jovyan/changmin/yolov8s+airbus_smartdata/weights/best.pt"
+    num_classes: 1
+
+  # ★★★ RFDN 설정 ★★★
+  rfdn:
     nf: 50
-    scale: 4
+    num_modules: 4
+    input_range: "0-255"
 
-  # Adaptive 메커니즘
+  # ★★★ Adaptive 설정 ★★★
+  adaptive:
+    low_conf_threshold: 0.15    # 이 이하면 confident negative
+    high_conf_threshold: 0.45   # 이 이상이면 confident positive
+    merge_iou_threshold: 0.5    # Pass1/Pass2 결과 병합 시 NMS IoU
+  
+  # 기존 arch4 설정 (호환성)
   arch4:
     lr_conf_threshold: 0.3
     lr_iou_threshold: 0.45
@@ -104,19 +120,20 @@ evaluation:
     size_bins: [0, 15, 30, 50, 100]
     analyze_missed_ships: true
 
-expected_performance:
-  pros:
-    - "FN 최소화 (small ships)"
-    - "Adaptive latency (필요시만 SR)"
-    - "연산 효율성"
+#expected_performance:
+#  pros:
+#    - "FN 최소화 (small ships)"
+#    - "Adaptive latency (필요시만 SR)"
+#    - "연산 효율성"
+#    - "Dual YOLO로 LR/HR 각각 최적화"
 
-  cons:
-    - "2-pass 오버헤드"
-    - "복잡한 학습 전략"
-    - "Threshold 튜닝 필요"
+#  cons:
+#    - "2-pass 오버헤드"
+#    - "복잡한 학습 전략"
+#    - "Threshold 튜닝 필요"
+#    - "Dual YOLO 시 메모리 증가"
 
   target_metrics:
     recall: 0.85
     sr_application_rate: 0.3
     latency_avg_ms: 90
-

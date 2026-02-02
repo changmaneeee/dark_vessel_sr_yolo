@@ -252,62 +252,89 @@ class Arch5BTrainer:
                 print(">>> 검증 완료: 학습 준비 끝. (Gradient Path 확보됨)\n")
     
     def train_epoch(self, epoch: int) -> Dict[str, float]:
-        """한 에폭 학습"""
-        self.model.train()
-        
-        total_loss = 0.0
-        sr_loss_sum = 0.0
-        det_loss_sum = 0.0
-        num_batches = 0
-        
-        pbar = tqdm(self.train_loader, desc=f"Epoch {epoch}")
-        
-        for batch in pbar:
-            lr_images = batch['lr_images'].to(self.device)
-            hr_images = batch['hr_images'].to(self.device)
-            targets = batch['targets'].to(self.device)
+            """
+            한 에폭 학습 (최종 수정판)
+            - RuntimeError: unscale_() has already been called 해결
+            - 기울기가 있는지 먼저 확인(Peek) 후, 있을 때만 Scaler 동작 수행
+            """
+            self.model.train()
             
-            # Forward + Loss
-            with autocast(enabled=self.use_amp):
-                outputs = self.model(lr_images, return_features=True)
-                loss_dict = self.model.compute_loss(outputs, targets, hr_gt=hr_images, lr_image=lr_images)
-                loss = loss_dict['total']
+            total_loss = 0.0
+            sr_loss_sum = 0.0
+            det_loss_sum = 0.0
+            num_batches = 0
             
-            # Backward
-            self.optimizer.zero_grad()
-            if self.use_amp:
-                self.scaler.scale(loss).backward()
-                self.scaler.unscale_(self.optimizer)
-                torch.nn.utils.clip_grad_norm_(self.model.parameters(), 10.0)
-                self.scaler.step(self.optimizer)
-                self.scaler.update()
-            else:
-                loss.backward()
-                torch.nn.utils.clip_grad_norm_(self.model.parameters(), 10.0)
-                self.optimizer.step()
+            pbar = tqdm(self.train_loader, desc=f"Epoch {epoch}")
             
-            # Metrics
-            total_loss += loss.item()
-            sr_loss_sum += loss_dict.get('sr_loss', torch.tensor(0)).item() if isinstance(loss_dict.get('sr_loss', 0), torch.Tensor) else loss_dict.get('sr_loss', 0)
-            det_loss_sum += loss_dict.get('det_loss', torch.tensor(0)).item() if isinstance(loss_dict.get('det_loss', 0), torch.Tensor) else loss_dict.get('det_loss', 0)
-            num_batches += 1
+            for batch in pbar:
+                lr_images = batch['lr_images'].to(self.device)
+                hr_images = batch['hr_images'].to(self.device)
+                targets = batch['targets'].to(self.device)
+                
+                # 1. Forward
+                self.optimizer.zero_grad()
+                
+                with autocast(enabled=self.use_amp):
+                    # Fusion 모델 Forward
+                    outputs = self.model(lr_images, return_features=True)
+                    
+                    # Loss 계산
+                    loss_dict = self.model.compute_loss(outputs, targets, hr_gt=hr_images, lr_image=lr_images)
+                    loss = loss_dict['total']
+                
+                # 2. Backward & Optimization
+                if self.use_amp:
+                    self.scaler.scale(loss).backward()
+                    
+                    # [최종 수정] unscale_()을 먼저 부르지 말고, 기울기 존재 여부부터 확인!
+                    # 그래야 기울기가 없을 때 Scaler 상태를 건드리지 않고 깔끔하게 스킵 가능함.
+                    trainable_params = [p for p in self.model.parameters() if p.requires_grad]
+                    has_grad = any(p.grad is not None for p in trainable_params)
+                    
+                    if has_grad:
+                        # 기울기가 있을 때만: Unscale -> Clip -> Step -> Update (한 세트로 실행)
+                        self.scaler.unscale_(self.optimizer)
+                        torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=5.0)
+                        self.scaler.step(self.optimizer)
+                        self.scaler.update()
+                    else:
+                        # 기울기가 없으면 Scaler를 아예 건드리지 않고 다음 배치로 넘어감 (상태 보존)
+                        pass
+                        
+                else:
+                    # AMP 안 쓸 때
+                    loss.backward()
+                    torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=5.0)
+                    self.optimizer.step()
+                
+                # Metrics
+                total_loss += loss.item()
+                
+                s_loss = loss_dict.get('sr_loss', 0)
+                d_loss = loss_dict.get('det_loss', 0)
+                
+                sr_loss_sum += s_loss.item() if torch.is_tensor(s_loss) else s_loss
+                det_loss_sum += d_loss.item() if torch.is_tensor(d_loss) else d_loss
+                
+                num_batches += 1
+                
+                # Progress bar 업데이트
+                pbar.set_postfix({
+                    'loss': f"{loss.item():.4f}",
+                    'det': f"{d_loss:.4f}",
+                    'lr': f"{self.optimizer.param_groups[0]['lr']:.2e}"
+                })
+                
+                # Log
+                self.global_step += 1
+                if self.writer and self.global_step % 50 == 0:
+                    self.writer.add_scalar('train/loss', loss.item(), self.global_step)
             
-            # Progress
-            pbar.set_postfix({
-                'loss': f"{loss.item():.4f}",
-                'lr': f"{self.optimizer.param_groups[0]['lr']:.2e}"
-            })
-            
-            # Log
-            self.global_step += 1
-            if self.writer and self.global_step % 50 == 0:
-                self.writer.add_scalar('train/loss', loss.item(), self.global_step)
-        
-        return {
-            'loss': total_loss / num_batches,
-            'sr_loss': sr_loss_sum / num_batches,
-            'det_loss': det_loss_sum / num_batches
-        }
+            return {
+                'loss': total_loss / num_batches if num_batches > 0 else 0,
+                'sr_loss': sr_loss_sum / num_batches if num_batches > 0 else 0,
+                'det_loss': det_loss_sum / num_batches if num_batches > 0 else 0
+            }
     
     @torch.no_grad()
     def validate(self) -> Dict[str, float]:
