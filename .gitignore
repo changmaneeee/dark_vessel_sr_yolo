@@ -28,7 +28,7 @@ outputs/
 wandb/
 tensorboard/
 *.log
-
+*.jpg
 # Jupyter Notebooks
 .ipynb_checkpoints/
 notebooks/*.html

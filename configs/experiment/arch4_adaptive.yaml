@@ -1,139 +1,53 @@
-# Architecture 4: Confidence-Adaptive Pipeline (Dual YOLO)
+# =============================================================================
+# Arch4 Configuration: Confidence-Adaptive Pipeline (Dual YOLO + SR)
+# =============================================================================
 
-defaults:
-  - ../default.yaml
-  
 data:
-  hr_root: "/home/jovyan/changmin/cv_ship_detact/datas/smart_airbus_dataset"
-  hr_val_images: "/home/jovyan/changmin/cv_ship_detact/datas/smart_airbus_dataset/images/val"
-  hr_val_labels: "/home/jovyan/changmin/cv_ship_detact/datas/smart_airbus_dataset/labels/val"
-    
-  lr_root: "/home/jovyan/changmin/cv_ship_detact/datas/smart_airbus_dataset_lr"
-  lr_val_images: "/home/jovyan/changmin/cv_ship_detact/datas/smart_airbus_dataset_lr/images/val"
-  lr_val_labels: "/home/jovyan/changmin/cv_ship_detact/datas/smart_airbus_dataset_lr/labels/val"
-    
-  scale_factor: 4
+  # 데이터셋 경로 (절대경로 권장)
+  hr_root: "/home/changmin/smart_airbus_data"
+  hr_val_images: "images/val"  # root 기준 상대경로
+  hr_val_labels: "labels/val"
+  
+  lr_root: "/home/changmin/smart_airbus_data_lr"
+  lr_val_images: "images/val"
+  
   upscale_factor: 4
 
-experiment:
-  name: "arch4_confidence_adaptive"
-  description: "Confidence-based adaptive SR application with Dual YOLO"
-  architecture: "arch4"
-
 model:
-  pipeline: "arch4_adaptive"
-  sr_type: "rfdn"
-  detector: "yolov8s"
+  # 1. SR Model Settings
+  sr:
+    type: "rfdn"
+    weights: "/home/changmin/dark_vessel_sr_yolo/weights/rfdn/model_best.pt"
+    # RFDN Architecture Params
+    rfdn:
+      nf: 50
+      num_modules: 4
 
-  # ★★★ Weights 경로 (Dual YOLO 지원) ★★★
-  weights:
-    sr_model: "/home/jovyan/changmin/rfdn_model/experiment/rfdn_smart_airbus_final_fix/model/model_best.pt"
-    # 기존 단일 detector 호환용
-    detector: "/home/jovyan/changmin/yolov8s+HR_airbus_smartdata/weights/best.pt"
-
-  # ★★★ YOLO 설정 (Dual YOLO) ★★★
+  # 2. Dual YOLO Settings
   yolo:
-    # HR용 YOLO - Pass2 (SR 이미지 탐지)
-    weights_path: "/home/jovyan/changmin/yolov8s+HR_airbus_smartdata/weights/best.pt"
-    # LR용 YOLO - Pass1 (LR upsampled 이미지 탐지)
-    weights_path_lr: "/home/jovyan/changmin/yolov8s+airbus_smartdata/weights/best.pt"
-    num_classes: 1
+    # Sniper (HR): Pass 2용 고성능 모델
+    weights_hr: "/home/changmin/yolov8s+HR_airbus_smartdata/weights/best.pt"
+    # Scout (LR): Pass 1용 정찰 모델
+    weights_lr: "/home/changmin/yolov8s+airbus_smartdata/weights/best.pt"
+    classes: 1
 
-  # ★★★ RFDN 설정 ★★★
-  rfdn:
-    nf: 50
-    num_modules: 4
-    input_range: "0-255"
-
-  # ★★★ Adaptive 설정 ★★★
-  adaptive:
-    low_conf_threshold: 0.15    # 이 이하면 confident negative
-    high_conf_threshold: 0.45   # 이 이상이면 confident positive
-    merge_iou_threshold: 0.5    # Pass1/Pass2 결과 병합 시 NMS IoU
-  
-  # 기존 arch4 설정 (호환성)
+  # 3. Arch4 Strategy (핵심 파라미터 통합)
   arch4:
-    lr_conf_threshold: 0.3
-    lr_iou_threshold: 0.45
-    adaptive_strategy: "confidence"
-    sr_trigger_conf: 0.5
-    sr_trigger_size: 0.02
-    refinement_mode: "roi"
-    roi_expansion: 1.5
-    hr_conf_threshold: 0.25
-    hr_iou_threshold: 0.45
+    # [Scout Strategy]
+    pass1_conf: 0.1       # "의심" 기준 (이보다 낮으면 버림, 높으면 1차 탐지)
+    high_conf: 0.45       # "확신" 기준 (이보다 높으면 SR 없이 즉시 확정)
+    
+    # [Sniper Strategy]
+    final_conf: 0.25      # 최종 결과 필터링 기준 (Pass 2 결과)
+    
+    # [Merge & Crop]
+    merge_iou: 0.5        # Pass 1 박스 병합 시 NMS 기준
+    roi_expansion: 1.5    # Crop 영역 확장 비율 (여유 공간)
+    
+    # [System]
+    batch_size_sr: 32     # 한 번에 처리할 SR Crop 개수 (VRAM 최적화)
 
-training:
-  epochs: 300
-  batch_size: 6
-
-  phases:
-    - name: "pretrain_components"
-      epochs: 50
-      freeze_detector: true
-      loss_weights:
-        sr_alpha: 0.8
-        det_beta: 0.2
-
-    - name: "joint_adaptive"
-      epochs: 200
-      freeze_detector: false
-      loss_weights:
-        sr_alpha: 0.4
-        det_beta: 0.6
-        adaptive_loss: 0.1
-
-    - name: "finetune"
-      epochs: 50
-      loss_weights:
-        sr_alpha: 0.2
-        det_beta: 0.8
-        adaptive_loss: 0.0
-
-losses:
-  adaptive_decision:
-    type: "binary_cross_entropy"
-    weight: 0.1
-    target: "fn_reduction"
-
-  selective_sr_loss:
-    type: "l1"
-    weight: 0.7
-    apply_on: "sr_regions"
-
-evaluation:
-  analyze_adaptive_decisions: true
-  adaptive_analysis:
-    save_decision_maps: true
-    count_sr_applications: true
-    measure_fn_reduction: true
-
-  metrics:
-    - "mAP@0.5"
-    - "Recall"
-    - "Precision"
-    - "F1"
-    - "SR_Application_Rate"
-    - "Latency_Avg"
-
-  fn_analysis:
-    size_bins: [0, 15, 30, 50, 100]
-    analyze_missed_ships: true
-
-#expected_performance:
-#  pros:
-#    - "FN 최소화 (small ships)"
-#    - "Adaptive latency (필요시만 SR)"
-#    - "연산 효율성"
-#    - "Dual YOLO로 LR/HR 각각 최적화"
-
-#  cons:
-#    - "2-pass 오버헤드"
-#    - "복잡한 학습 전략"
-#    - "Threshold 튜닝 필요"
-#    - "Dual YOLO 시 메모리 증가"
-
-  target_metrics:
-    recall: 0.85
-    sr_application_rate: 0.3
-    latency_avg_ms: 90
+# (선택) 로깅/저장 관련 설정
+logging:
+  save_dir: "results/arch4_inference"
+  visualize: false

@@ -7,10 +7,10 @@ from src.models.pipelines.arch4_adaptive import Arch4Adaptive
 # =============================================================================
 # [설정] 경로 확인 필수!
 # =============================================================================
-IMG_PATH = "data/test_lr.jpg"          # 테스트할 이미지
-WEIGHTS_LR = "weights/yolov8s_lr.pt"   # LR 가중치
-WEIGHTS_HR = "weights/yolov8s_hr.pt"   # (형식상 필요)
-WEIGHTS_SR = "weights/rfdn_x4.pt"      # (형식상 필요)
+IMG_PATH = "/home/changmin/smart_airbus_data_lr/images/val/0a24a4100.jpg"          # 테스트할 이미지
+WEIGHTS_LR = "/home/changmin/yolov8s+airbus_smartdata/weights/best.pt"   # LR 가중치
+WEIGHTS_HR = "/home/changmin/yolov8s+HR_airbus_smartdata/weights/best.pt"   # (형식상 필요)
+WEIGHTS_SR = "/home/changmin/dark_vessel_sr_yolo/weights/rfdn/model_best.pt"      # (형식상 필요)
 
 def main():
     device = 'cuda' if torch.cuda.is_available() else 'cpu'

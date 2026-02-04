@@ -1,322 +1,453 @@
-"""
-=============================================================================
-arch4_adaptive.py - Architecture 4: Adaptive 2-Pass Pipeline (Final Corrected)
-=============================================================================
-[Arch0와 동일한 좌표계 적용]
-1. Pass 1 입력: Upsampled Image (640px) 사용
-   - Arch0가 SR(640px) 이미지를 입력받는 것과 동일한 스케일 환경 조성.
-   - LR 모델(192px)이라도 큰 이미지를 주면 Recall이 상승함.
-2. 좌표 스케일링 삭제:
-   - 입력이 640px이므로 출력 좌표도 640px 기준.
-   - Arch0처럼 별도의 * scale 연산 없이 바로 사용 가능.
-"""
-
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from typing import Dict, Any, Optional, Tuple, List
-from torchvision.ops import nms, batched_nms
+from dataclasses import dataclass, field
+from typing import Optional, Tuple, List, Union,  Dict, Any
 from pathlib import Path
-
+from types import SimpleNamespace
+from src.models.sr_models.mamba_sr import MambaSR
+from src.models.detectors.yolo_wrapper import YOLOWrapper
 from src.models.pipelines.base_pipeline import BasePipeline
 from src.models.sr_models.rfdn import RFDN
-from src.models.detectors.yolo_wrapper import YOLOWrapper
-from src.losses.detection_loss import DetectionLoss
-from src.losses.sr_loss import SRLoss
-from types import SimpleNamespace
+from torchvision.ops import nms
 
+# =============================================================================
+# 1. Configuration Data Class
+# =============================================================================
+
+@dataclass
+class Arch4Config:
+
+    # system
+    device: str = 'cuda' if torch.cuda.is_available() else 'cpu'
+
+    # Dual YOLO Paths
+    yolo_weights_hr: str = ""
+    yolo_weights_lr: str = ""
+    yolo_classes: int = 1  # Number of classes for YOLO models
+
+    #SR Model Path
+    sr_weights: str = ""
+    sr_type: str = ""
+    upscale_factor: int = 4
+
+    # RFDN Specific
+    rfdn_nf: int = 50
+    rfdn_modules: int = 4
+
+    # Adaptive strategy Thresholds
+    pass1_conf: float = 0.1
+    pass2_conf: float = 0.45
+    final_conf: float = 0.25
+    merge_iou: float = 0.5
+
+    #Crop Setting
+    roi_expansion: float = 1.5
+    crop_size_lr: int = 32
+    batch_size_sr: int= 32
+
+    def __post_init__(self):
+        if not self.yolo_weights_hr:
+            raise ValueError("yolo_weights_hr must be specified")
+        if not self.yolo_weights_lr:
+            raise ValueError("yolo_weights_lr must be specified")
+        
+
+# =============================================================================
+# 2. Arch4 Adaptive Pipeline
+# =============================================================================
 
 class Arch4Adaptive(BasePipeline):
-    """
-    Architecture 4: Adaptive 2-Pass Pipeline
-    """
-
-    SUPPORTED_SR_TYPES = ['rfdn', 'mamba']
-
-    def __init__(self, config: Any):
+    def __init__(self, config: Dict[str, Any]):
         super().__init__(config)
+        self.cfg = self._parse_yaml_config(config)
 
-        def get_val(obj, key, default=None):
-            if hasattr(obj, key): return getattr(obj, key)
-            elif isinstance(obj, dict): return obj.get(key, default)
-            return default
+        self._init_models()
+        self._print_info()
 
-        # Config 파싱
-        model_config = get_val(config, 'model', config)
-        data_config = get_val(config, 'data', SimpleNamespace())
 
-        self.upscale_factor = get_val(data_config, 'upscale_factor', 4)
+        print(f"\n[Arch4] Initialized with Architecture 4: Confidence-Adaptive")
+        print(f"  - Scout (LR): {Path(self.cfg.yolo_weights_lr).name}")
+        print(f"  - Sniper (HR): {Path(self.cfg.yolo_weights_hr).name}")
+        print(f"  - SR Model: {self.cfg.sr_type.upper()} (x{self.cfg.upscale_factor})")
+        print(f"  - Thresholds: Pass1={self.cfg.pass1_conf} | SkipSR={self.cfg.pass2_conf} | Final={self.cfg.final_conf}")
+
+    def _parse_yaml_config(self, cfg_dict: Dict) -> Arch4Config:
         
-        # SR 타입 결정
-        self.sr_type = get_val(model_config, 'sr_type', 'rfdn').lower()
-        if self.sr_type not in self.SUPPORTED_SR_TYPES:
-            print(f"[Arch4] ⚠️ Unknown SR type '{self.sr_type}', falling back to RFDN")
-            self.sr_type = 'rfdn'
-
-        # YOLO 설정
-        yolo_config = get_val(model_config, 'yolo', SimpleNamespace())
-        self.yolo_weights_hr = get_val(yolo_config, 'weights_path', 'yolov8n.pt')
-        self.yolo_weights_lr = get_val(yolo_config, 'weights_path_lr', None)
-        self.num_classes = get_val(yolo_config, 'num_classes', 1)
+        def get_val(path, default=None):
+            keys = path.split('.')
+            curr = cfg_dict
+            for k in keys:
+                if isinstance(curr, dict) and k in curr:
+                    curr = curr[k]
+                elif hasattr(curr, k):
+                    curr = getattr(curr, k)
+                else:
+                    return default
+            return curr
         
-        if self.yolo_weights_lr is None:
-            self.yolo_weights_lr = self.yolo_weights_hr
-            self.use_dual_yolo = False
-        else:
-            self.use_dual_yolo = True
+        return Arch4Config(
 
-        # Adaptive 설정
-        adaptive_config = get_val(model_config, 'adaptive', SimpleNamespace())
-        self.pass1_conf_threshold = get_val(adaptive_config, 'pass1_conf_threshold', 0.01)
-        self.high_conf_threshold = get_val(adaptive_config, 'high_conf_threshold', 0.40)
-        self.final_conf_threshold = get_val(adaptive_config, 'final_conf_threshold', 0.25)
-        self.nms_iou_threshold = get_val(adaptive_config, 'nms_iou_threshold', 0.45)
-        self.sr_on_zero_detection = get_val(adaptive_config, 'sr_on_zero_detection', False)
+            upscale_factor=get_val('data.upscale_factor',4),
 
-        # SR 모델 생성
-        print(f"\n[Arch4] 선택된 SR 모델: {self.sr_type.upper()}")
-        if self.sr_type == 'mamba': self._init_mamba_sr(model_config)
-        else: self._init_rfdn_sr(model_config)
+            yolo_weights_hr = get_val('model.yolo.weights_hr',''),
+            yolo_weights_lr = get_val('model.yolo.weights_lr',''),
+            yolo_classes = get_val('model.yolo.num_classes',1),
 
-        # YOLO Detector 생성
-        print(f"[Arch4] Initializing YOLO...")
-        self.detector_hr = YOLOWrapper(
-            model_path=self.yolo_weights_hr, num_classes=self.num_classes, device=self.device, verbose=False
+            sr_weights = get_val('model.sr.weights',''),
+            sr_type= get_val('model.sr.type',''),
+
+            #RFDN
+            rfdn_nf = get_val('model.sr.rfdn.nf', 50),
+            rfdn_modules = get_val('model.sr.rfdn.num_modules', 4),
+
+            pass1_conf = get_val('model.arch4.pass1_conf', 0.1),
+            pass2_conf = get_val('model.arch4.pass2_conf', 0.45),
+            final_conf = get_val('model.arch4.final_conf', 0.25),
+            merge_iou = get_val('model.arch4.merge_iou', 0.5),
+
+            #crop
+            roi_expansion = get_val('model.arch4.roi_expansion', 1.5),
+            batch_size_sr = get_val('model.arch4.batch_size_sr', 32)
+
         )
-        print(f"[Arch4] ✓ YOLO (HR/Pass2): {self.yolo_weights_hr}")
-        
-        if self.use_dual_yolo:
-            self.detector_lr = YOLOWrapper(
-                model_path=self.yolo_weights_lr, num_classes=self.num_classes, device=self.device, verbose=False
+    
+    def _init_models(self):
+        print(f"\n[Arch4] Loading Models...")
+
+        # 1. SR MODEL
+        if self.cfg.sr_type == 'mamba':
+            if MambaSR is None:
+                raise ImportError("MambaSR module not found!")
+            print(f" > Loading SR: MambaSR (x{self.cfg.upscale_factor})")
+            self.sr_model = MambaSR(
+                scale_factor=self.cfg.upscale_factor,
+                img_size=192,
+                embed_dim=48,
+                d_state=8)
+            
+        else:
+            print(f"  > Loading SR: RFDN (x{self.cfg.upscale_factor}, nf={self.cfg.rfdn_nf}")
+            self.sr_model = RFDN(
+                in_channels= 3,
+                out_channels=3, 
+                nf=self.cfg.rfdn_nf,
+                num_modules=self.cfg.rfdn_modules,
+                upscale=self.cfg.upscale_factor,
+                input_range='0-255' ##수정
             )
-            print(f"[Arch4] ✓ YOLO (LR/Pass1): {self.yolo_weights_lr}")
+
+        # SR Weights 
+        if self.cfg.sr_weights and Path(self.cfg.sr_weights).exists():
+            ckpt = torch.load(self.cfg.sr_weights, map_location='cpu')
+            state_dict = ckpt['model_state_dict'] if 'model_state_dict' in ckpt else ckpt
+            try:
+                self.sr_model.load_state_dict(state_dict, strict=True)
+                print(f"   ✓ SR Weights loaded: {Path(self.cfg.sr_weights).name}")
+            except Exception as e:
+                print(f"   ! Warning: SR Weights loading issue: {e}")
+                self.sr_model.load_state_dict(state_dict, strict=False)
         else:
-            self.detector_lr = self.detector_hr
-            print(f"[Arch4] ✓ YOLO (공유): {self.yolo_weights_hr}")
-        
-        self.detector = self.detector_hr # 기본값
+            print(f" SR Weights not found! Initialized randomly.")
 
-        # Loss Functions
-        self.det_loss_fn = DetectionLoss(self.detector_hr.detection_model)
-        self.sr_loss_fn = SRLoss(l1_weight=1.0, charbonnier=True)
-        self._det_weight = 1.0
-        self._sr_weight = 1.0
+        self.sr_model.to(self.cfg.device).eval()
 
-        # 통계 추적
-        self.register_buffer('total_images', torch.tensor(0))
-        self.register_buffer('confirmed_count', torch.tensor(0))
-        self.register_buffer('full_sr_count', torch.tensor(0))
-        self.register_buffer('zero_det_count', torch.tensor(0))
+        # 2. Dual YOLO MODELS
+        # LR YOLO
+        print(f" > Loading Scout YOLO (LR)...{Path(self.cfg.yolo_weights_lr).name}")
+        self.scout_detector = YOLOWrapper(
+            model_path = self.cfg.yolo_weights_lr,
+            num_classes = self.cfg.yolo_classes,
+            device = self.cfg.device, verbose=False
+        )
+        self.scout_detector.eval()
 
-        self.to(self.device)
+        # HR YOLO
+        print(f" > Loading Sniper YOLO (HR)...{Path(self.cfg.yolo_weights_hr).name}")
+        self.sniper_detector = YOLOWrapper(
+            model_path = self.cfg.yolo_weights_hr,
+            num_classes = self.cfg.yolo_classes,
+            device = self.cfg.device, verbose=False
+        )
+        self.sniper_detector.eval()
 
-    def _init_rfdn_sr(self, model_config):
-        # (기존 코드 유지 - Arch0와 동일)
-        rfdn_config = getattr(model_config, 'rfdn', {})
-        if isinstance(rfdn_config, dict):
-            self.nf = rfdn_config.get('nf', 50)
-            self.num_modules = rfdn_config.get('num_modules', 4)
-        else:
-            self.nf = getattr(rfdn_config, 'nf', 50)
-            self.num_modules = getattr(rfdn_config, 'num_modules', 4)
-        
-        weights_config = getattr(model_config, 'weights', {})
-        self.sr_weights_path = getattr(weights_config, 'sr_model', None) if not isinstance(weights_config, dict) else weights_config.get('sr_model')
-        
-        self.sr_model = RFDN(in_channels=3, out_channels=3, nf=self.nf, num_modules=self.num_modules, upscale=self.upscale_factor, input_range='0-255')
-        
-        if self.sr_weights_path and Path(self.sr_weights_path).exists():
-            checkpoint = torch.load(self.sr_weights_path, map_location='cpu')
-            state_dict = checkpoint['model_state_dict'] if 'model_state_dict' in checkpoint else checkpoint
-            self.sr_model.load_state_dict(state_dict, strict=False)
-            print(f"[Arch4] ✓ RFDN weights loaded")
+    def _print_info(self):
+        print(f"\n[Arch4 Config]")
+        print(f" - Scout YOLO Weights (LR): {self.cfg.pass1_conf}")
+        print(f" - Sniper YOLO Weights (HR): {self.cfg.pass2_conf}")
+        print(f" - Batch Strategy: {self.cfg.batch_size_sr} crops per SR pass")
 
-    def _init_mamba_sr(self, model_config):
-        from src.models.sr_models.mamba_sr import MambaSR
-        self.sr_model = MambaSR(scale_factor=self.upscale_factor)
+# =============================================================================
+# 3. Forward Logic
+# =============================================================================
 
-    def _apply_full_sr(self, lr_image: torch.Tensor) -> torch.Tensor:
-        lr_255 = lr_image * 255.0
-        hr_255 = self.sr_model(lr_255)
-        hr_image = torch.clamp(hr_255 / 255.0, 0.0, 1.0)
-        return hr_image
-
-    def _classify_image(self, detections: Dict) -> str:
-        scores = detections.get('scores', torch.tensor([]))
-        if len(scores) == 0: return 'zero_detection'
-        
-        # pass1_conf(low)보다 크고 high_conf보다 작은 것이 하나라도 있으면 SR
-        has_uncertain = ((scores >= self.pass1_conf_threshold) & (scores < self.high_conf_threshold)).any()
-        
-        if has_uncertain: return 'need_sr'
-        else: return 'confirmed'
-
-    # =========================================================================
-    # Forward Method (Arch0 스타일로 수정됨)
+# =========================================================================
+    # 3. Forward Logic (With Debug Mode & Safety Checks)
     # =========================================================================
     @torch.no_grad()
-    def forward(self, lr_image: torch.Tensor, return_intermediate: bool = False) -> Dict[str, Any]:
+    def forward(self, lr_images: torch.Tensor, debug: bool = False) -> Dict[str, Any]:
         """
-        [Arch0 스타일 수정]
-        1. Pass 1 입력: Upsampled Image (640px)
-           - Arch0가 640px SR 이미지를 쓰는 것과 스케일을 맞춤.
-        2. 좌표 변환: 삭제 (입력이 640px이므로 출력도 640px 기준)
+        [Process]
+        1. Scout: LR 이미지 정찰
+        2. Filter: A급(확실) / B급(애매) 분류
+        3. Batch SR: B급만 모아서 SR & Sniper 수행
+        4. Merge: 결과 합치기
         """
-        self.eval()
-        B = lr_image.size(0)
-        
-        # 1. Upsampling (160 -> 640) [Arch0의 SR 역할 대용]
-        lr_upsampled = F.interpolate(
-            lr_image,
-            scale_factor=self.upscale_factor,
-            mode='bilinear',
-            align_corners=False
-        )
+        batch_size, _, height, width = lr_images.shape
+        self.scout_detector.eval()
+        self.sr_model.eval()
+        self.sniper_detector.eval()
 
-        # 2. Pass 1 Detect (Arch0처럼 큰 이미지 입력)
-        pass1_detections = self.detector_lr.predict(
-            lr_upsampled, # ★ 중요: 큰 이미지 입력
-            conf=self.pass1_conf_threshold,
-            iou=self.nms_iou_threshold
-        )
-
-        # ★ 좌표 스케일링(* scale) 삭제됨 ★
-        # Arch0도 여기서 별도 스케일링을 안 함 (이미지가 크니까)
-
-        self.total_images += B
-        final_detections = []
-        actions_taken = []
-        hr_images = []
-
-        for i in range(B):
-            det = pass1_detections[i]
-            action = self._classify_image(det)
-            actions_taken.append(action)
-            
-            if action == 'confirmed':
-                self.confirmed_count += 1
-                scores = det['scores']
-                if len(scores) > 0:
-                    mask = scores >= self.high_conf_threshold
-                    final_detections.append({
-                        'boxes': det['boxes'][mask],
-                        'scores': det['scores'][mask],
-                        'classes': det['classes'][mask]
-                    })
-                else:
-                    final_detections.append(det)
-                hr_images.append(None)
-            
-            elif action == 'need_sr':
-                self.full_sr_count += 1
-                # SR 수행 (Arch0와 동일 과정)
-                hr_image = self._apply_full_sr(lr_image[i:i+1])
-                hr_images.append(hr_image)
-                # Pass 2 재탐지
-                pass2_result = self.detector_hr.predict(
-                    hr_image, 
-                    conf=self.final_conf_threshold, 
-                    iou=self.nms_iou_threshold
-                )[0]
-                final_detections.append(pass2_result)
-            
-            else: # zero_detection
-                self.zero_det_count += 1
-                if self.sr_on_zero_detection:
-                    hr_image = self._apply_full_sr(lr_image[i:i+1])
-                    hr_images.append(hr_image)
-                    pass2_result = self.detector_hr.predict(
-                        hr_image, 
-                        conf=self.final_conf_threshold, 
-                        iou=self.nms_iou_threshold
-                    )[0]
-                    final_detections.append(pass2_result)
-                else:
-                    hr_images.append(None)
-                    final_detections.append({'boxes': torch.tensor([], device=self.device), 'scores': torch.tensor([], device=self.device), 'classes': torch.tensor([], device=self.device)})
-
-        result = {
-            'detections': final_detections,
-            'actions': actions_taken,
-            'stats': self.get_stats()
+        # [Debug Storage] 디버깅 데이터 저장소 초기화
+        debug_info = {
+            'pass1_raw': [],      # Scout 원본 결과
+            'crops_lr': [],       # 잘라낸 LR 이미지들
+            'crops_sr': [],       # SR 복원된 HR 이미지들
+            'crop_meta': [],      # Crop 좌표 정보
+            'pass2_raw': []       # Sniper 원본 결과
         }
 
-        if return_intermediate:
-            result['pass1_detections'] = pass1_detections
-            result['hr_images'] = hr_images
-            result['lr_upsampled'] = lr_upsampled
-
-        return result
-
-    # --- Training Methods (학습 시에도 일관성 유지) ---
-    def forward_train(self, lr_image: torch.Tensor, hr_gt: Optional[torch.Tensor] = None) -> Dict[str, Any]:
-        self.train()
-        lr_255 = lr_image * 255.0
-        hr_255 = self.sr_model(lr_255)
-        hr_image = torch.clamp(hr_255 / 255.0, 0.0, 1.0)
+        # --- Phase 1: Scout (정찰) ---
+        pass1_preds = self.scout_detector.predict(
+            lr_images, 
+            conf=self.cfg.pass1_conf, 
+            iou=self.cfg.merge_iou
+        )
         
-        lr_upsampled = F.interpolate(lr_image, scale_factor=self.upscale_factor, mode='bilinear', align_corners=False)
-        
-        self.detector_hr.train()
-        self.detector_lr.train()
-        
-        detections_hr = self.detector_hr(hr_image)
-        # [수정] 학습 시에도 Pass 1은 Upsampled 이미지 사용 (Arch0 스타일)
-        detections_lr = self.detector_lr(lr_upsampled)
+        # 디버그: 1차 결과 저장
+        if debug:
+            debug_info['pass1_raw'] = pass1_preds
 
-        return {'hr_image': hr_image, 'lr_upsampled': lr_upsampled, 'detections_hr': detections_hr, 'detections_lr': detections_lr}
+        final_results = []
+        all_crops_lr = []
+        crop_metadata = []
 
-    def compute_loss(self, outputs, targets, hr_gt=None, loss_mode='both') -> Dict[str, torch.Tensor]:
-        hr_image = outputs['hr_image']
-        detections_hr = outputs['detections_hr']
-        detections_lr = outputs['detections_lr']
-        lr_upsampled = outputs['lr_upsampled'] # Upsampled 이미지 사용
-        device = hr_image.device
-        
-        det_loss_hr = torch.tensor(0.0, device=device)
-        if loss_mode in ['hr_only', 'both'] and targets is not None:
-            det_loss_hr = self.det_loss_fn(detections_hr, targets, hr_image)['total']
+        # --- Phase 2: Filter (분류) ---
+        for b_idx, det in enumerate(pass1_preds):
+            boxes, scores, classes = det['boxes'], det['scores'], det['classes']
+
+
+            if debug and len(scores) > 0:
+                print(f"\n[Img {b_idx}] Scout 결과: {len(scores)}개 발견 (Max Conf: {scores.max():.4f})")
+                print(f"  - Thresholds: Pass1={self.cfg.pass1_conf}, High={self.cfg.pass2_conf}")
+
+            # A급(확실) vs B급(애매) 분류
+            confident_mask = scores >= self.cfg.pass2_conf
+            confident_boxes = boxes[confident_mask]
+            confident_scores = scores[confident_mask]
+            confident_classes = classes[confident_mask]
             
-        det_loss_lr = torch.tensor(0.0, device=device)
-        if loss_mode in ['lr_only', 'both'] and targets is not None:
-            # LR Loss는 Upsampled 이미지를 기준으로 계산
-            det_loss_lr = self.det_loss_fn(detections_lr, targets, lr_upsampled)['total']
-            
-        sr_loss = torch.tensor(0.0, device=device)
-        if hr_gt is not None:
-            sr_loss = self.sr_loss_fn(hr_image, hr_gt)['total']
-            
-        total_loss = self._det_weight * det_loss_hr + 0.3 * det_loss_lr + self._sr_weight * sr_loss
-        return {'total': total_loss, 'det_loss_hr': det_loss_hr, 'det_loss_lr': det_loss_lr, 'sr_loss': sr_loss}
+            uncertain_mask = (~confident_mask) 
+            uncertain_boxes = boxes[uncertain_mask]
 
-    def set_thresholds(self, pass1_conf=None, high_conf=None, final_conf=None, nms_iou=None, sr_on_zero=None):
-        if pass1_conf is not None: self.pass1_conf_threshold = pass1_conf
-        if high_conf is not None: self.high_conf_threshold = high_conf
-        if final_conf is not None: self.final_conf_threshold = final_conf
-        if nms_iou is not None: self.nms_iou_threshold = nms_iou
-        if sr_on_zero is not None: self.sr_on_zero_detection = sr_on_zero
-        # print(f"[Arch4] Thresholds updated: Pass1={self.pass1_conf_threshold}, High={self.high_conf_threshold}")
+            if debug:
+                print(f"  -> A급(확실): {len(confident_boxes)}개")
+                print(f"  -> B급(애매): {len(uncertain_boxes)}개 (SR 대상)")
 
-    def get_stats(self) -> Dict[str, Any]:
-        total = max(self.total_images.item(), 1)
+
+            final_results.append({
+                'boxes': [confident_boxes],
+                'scores': [confident_scores],
+                'classes': [confident_classes]
+            })
+
+            if len(uncertain_boxes) == 0:
+                continue
+
+            # B급은 Crop 수행
+            # (아까 수정한 Safety Guard가 있는 _extract_crops가 호출됨)
+            crops, coords = self._extract_crops(lr_images[b_idx], uncertain_boxes)
+            
+            for crop, coord in zip(crops, coords):
+                all_crops_lr.append(crop)
+                crop_metadata.append((b_idx, coord))
+
+        # --- Phase 3: Batch SR & Sniper ---
+        if len(all_crops_lr) > 0:
+            # 1. Stack
+            batch_crops_lr = torch.stack(all_crops_lr).to(self.cfg.device)
+            
+            # 2. SR 수행
+            batch_crops_hr = self._run_batch_sr(batch_crops_lr)
+
+            # 디버그: Crop 이미지들 저장 (CPU로 이동)
+            if debug:
+                debug_info['crops_lr'] = [c.cpu() for c in all_crops_lr]
+                debug_info['crops_sr'] = [c.cpu() for c in batch_crops_hr]
+                debug_info['crop_meta'] = crop_metadata
+
+            # 3. Sniper 수행
+            sniper_results = self.sniper_detector.predict(
+                batch_crops_hr, 
+                conf=self.cfg.final_conf, 
+                iou=self.cfg.merge_iou
+            )
+            
+            if debug:
+                debug_info['pass2_raw'] = sniper_results
+
+            # --- Phase 4: Assembly ---
+            for i, res in enumerate(sniper_results):
+                if len(res['boxes']) == 0: continue
+                
+                meta = crop_metadata[i]
+                img_idx = meta[0]
+                crop_x1, crop_y1, _, _ = meta[1]
+                scale = self.cfg.upscale_factor
+                
+                # 좌표 복원
+                global_boxes = res['boxes'].clone()
+                global_boxes[:, [0, 2]] = (global_boxes[:, [0, 2]] / scale) + crop_x1
+                global_boxes[:, [1, 3]] = (global_boxes[:, [1, 3]] / scale) + crop_y1
+
+                # 결과 합류
+                final_results[img_idx]['boxes'].append(global_boxes)
+                final_results[img_idx]['scores'].append(res['scores'])
+                final_results[img_idx]['classes'].append(res['classes'])
+
+        # --- Final Merge (NMS) ---
+        output_detections = []
+        for res in final_results:
+            if len(res['boxes']) == 0:
+                output_detections.append({
+                    'boxes': torch.empty(0,4).to(self.cfg.device), 
+                    'scores': torch.empty(0).to(self.cfg.device), 
+                    'classes': torch.empty(0).to(self.cfg.device)
+                })
+                continue
+            
+            all_boxes = torch.cat(res['boxes'], dim=0)
+            all_scores = torch.cat(res['scores'], dim=0)
+            all_classes = torch.cat(res['classes'], dim=0)
+            
+            if len(all_boxes) > 0:
+                keep = nms(all_boxes, all_scores, self.cfg.merge_iou)
+                output_detections.append({
+                    'boxes': all_boxes[keep], 
+                    'scores': all_scores[keep], 
+                    'classes': all_classes[keep]
+                })
+            else:
+                output_detections.append({
+                    'boxes': all_boxes, 'scores': all_scores, 'classes': all_classes
+                })
+
+        # ★★★ 여기가 핵심입니다! ★★★
+        # debug=True일 때만 딕셔너리에 'debug_info'를 넣어서 반환합니다.
+        if debug:
+            return {'detections': output_detections, 'debug_info': debug_info}
+        else:
+            return {'detections': output_detections}
+            
+    def compute_loss(self, outputs, targets, hr_gt=None):
+
+        dummy_loss = torch.tensor(0.0, device=self.cfg.device, requires_grad=True)
         return {
-            'total_images': self.total_images.item(),
-            'confirmed': self.confirmed_count.item(),
-            'full_sr': self.full_sr_count.item(),
-            'zero_det': self.zero_det_count.item(),
-            'sr_saved_ratio': (self.confirmed_count.item() + self.zero_det_count.item()) / total * 100
+            'total' : dummy_loss,
+            'box_loss' : dummy_loss,
+            'cls_loss' : dummy_loss,
+            'dfl_loss' : dummy_loss,
+            'sr_loss' : dummy_loss
         }
     
-    def reset_stats(self) -> None:
-        self.total_images.zero_()
-        self.confirmed_count.zero_()
-        self.full_sr_count.zero_()
-        self.zero_det_count.zero_()
-        
-    def get_architecture_info(self) -> Dict[str, Any]:
-        return {'architecture': 'Arch4_Adaptive_Arch0_Style', 'stats': self.get_stats()}
-        
-    def freeze_yolo(self): pass
-    def freeze_sr(self): pass
-    def unfreeze_all(self): pass
-    def get_parameter_groups(self, base_lr, sr_lr_scale, yolo_lr_scale): return []
+    #=======================================================================
+    # Helpers Methods
+    #=======================================================================
+    def _extract_crops(self, image: torch.Tensor, boxes: torch.Tensor):
+        crops = []
+        coords = []
+        _, img_h, img_w  = image.shape
+
+        expansion = self.cfg.roi_expansion
+
+        for i, box in enumerate(boxes):
+            x1, y1, x2, y2 = box.tolist()
+            box_w, box_h = x2 - x1, y2 - y1
+
+            cx, cy = (x1 + x2) / 2, (y1 + y2) / 2
+            nw, nh = box_w * expansion, box_h * expansion
+
+            size = max(nw, nh, self.cfg.crop_size_lr)
+
+            nx1 = cx - size / 2
+            ny1 = cy - size / 2
+            nx2 = cx + size / 2
+            ny2 = cy + size / 2
+
+            # [Safety Guard 1] 정수 변환 및 이미지 범위 안으로 강제 고정 (Clamping)
+            ix1 = max(0, int(round(nx1)))
+            iy1 = max(0, int(round(ny1)))
+            ix2 = min(img_w, int(round(nx2)))
+            iy2 = min(img_h, int(round(ny2)))
+
+            # [Safety Guard 2] 유효성 검사 (가로/세로가 0 이하면 스킵)
+            if ix2 <= ix1 or iy2 <= iy1:
+                # 너무 구석이라 자를 게 없거나 에러인 경우 무시
+                print(f"      ⚠️ [Skip] 너비/높이가 0입니다. (W={ix2-ix1}, H={iy2-iy1})")
+                continue
+
+            try:
+                crop = image[:, iy1:iy2, ix1:ix2]
+            
+            except TypeError as e:
+                print(f"      ⚠️ [Skip] Crop 추출 중 오류 발생: {e}")
+                print(f"      ❌ [Error] 좌표 타입 오류: {type(iy1)}")
+                continue
+
+            if crop.numel() == 0:
+                print(f"      ⚠️ [Skip] 텐서가 비었습니다.")
+                continue
+            
+            try:
+                crop_resized = F.interpolate(
+                    crop.unsqueeze(0),
+                    size = (self.cfg.crop_size_lr, self.cfg.crop_size_lr),
+                    mode = 'bilinear', align_corners=False
+                )[0]
+
+                crops.append(crop_resized)
+                coords.append((ix1, iy1, ix2, iy2))
+            
+            except Exception as e:
+                print(f"      ⚠️ [Skip] Crop 처리 중 오류 발생: {e}")
+                continue
+
+        return crops, coords
+    
+    def _run_batch_sr(self, batch_lr: torch.Tensor) -> torch.Tensor:
+
+        _, _,h, w = batch_lr.shape
+        pad_h, pad_w = 0, 0
+
+        if h < 32: pad_h = 32 - h
+        if w < 32: pad_w = 32 - w
+
+        if pad_h > 0 or pad_w > 0:
+            batch_lr = F.pad(batch_lr, (0, pad_w, 0, pad_h), mode='replicate')
+
+        batch_lr_255 = batch_lr * 255.0
+
+        outputs=[]
+
+        for i in range(0, len(batch_lr_255), self.cfg.batch_size_sr):
+            
+            chunk = batch_lr_255[i : i + self.cfg.batch_size_sr]
+
+            with torch.no_grad():
+                sr_chunk = self.sr_model(chunk)
+
+            outputs.append(sr_chunk)
+        full_sr = torch.cat(outputs, dim=0)
+
+        if pad_h > 0 or pad_w > 0:
+            scale = self.cfg.upscale_factor
+            valid_h = h*scale
+            valid_w = w*scale
+            full_sr = full_sr[:, :, :valid_h, :valid_w]
+
+        #full_sr = full_sr/255.0
+
+        full_sr = torch.clamp(full_sr / 255.0, 0.0, 1.0)
+        return full_sr
+
+
