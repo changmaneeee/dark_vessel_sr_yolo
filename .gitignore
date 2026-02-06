@@ -151,7 +151,7 @@ analysis/
 *.jpeg
 !docs/figures/*.png
 !docs/figures/*.jpg
-
+*.csv
 # Experiment results
 experiments/
 ablation_results/
