@@ -29,7 +29,7 @@ model:
   # ★★★ Weights 경로 명시 ★★★
   weights:
     sr_model: "weights/rfdn/model_best.pt"
-    detector: "weights/yolohr/8s/best.pt"
+    detector: "/home/changmin/yolov8s+HR_airbus_smartdata/weights/best.pt"
 
   # ★★★ SR 설정 (0-255 범위) ★★★
   sr_config:

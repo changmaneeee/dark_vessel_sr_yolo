@@ -43,11 +43,11 @@ from ultralytics.utils.metrics import ap_per_class
 # [설정] 파라미터 그리드 (540개 조합)
 # =============================================================================
 PARAM_GRID = {
-    'crop_size_lr':  [16, 32, 48],
-    'pass1_conf':    [0.001, 0.005, 0.01],
-    'pass2_conf':    [0.1, 0.3],
-    'final_conf':    [0.2, 0.3, 0.4],
-    'roi_expansion': [1.0, 1.5, 2.0]
+    'crop_size_lr':  [32],
+    'pass1_conf':    [0.001],
+    'pass2_conf':    [0.1],
+    'final_conf':    [0.1],
+    'roi_expansion': [2.0]
 }
 
 NUM_SAMPLES = 2000

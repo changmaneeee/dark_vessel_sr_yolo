@@ -341,7 +341,7 @@ def main():
     parser.add_argument('--weights', type=str, default=None,
                         help='Arch0 전체 weights (optional)')
     parser.add_argument('--yolo_weights', type=str, 
-                        default='weights/yolohr/8s/best.pt')
+                        default='/home/changmin/yolov8s+HR_airbus_smartdata/weights/best.pt')
     parser.add_argument('--hr_data_yaml', type=str,
                         default='/home/changmin/smart_airbus_data/data.yaml')
     parser.add_argument('--lr_data_yaml', type=str,
@@ -350,7 +350,7 @@ def main():
                         default='/tmp/sr_images_eval')
     parser.add_argument('--output', type=str,
                         default='results/arch0_evaluation.json')
-    parser.add_argument('--max_images', type=int, default=None,
+    parser.add_argument('--max_images', type=int, default=2000,
                         help='평가할 최대 이미지 수 (None=전체)')
     parser.add_argument('--conf', type=float, default=0.25)
     parser.add_argument('--iou', type=float, default=0.45)
