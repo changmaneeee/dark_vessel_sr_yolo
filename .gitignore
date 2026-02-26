@@ -3,6 +3,7 @@
 # Data & Datasets
 data/
 datasets/
+dataset/
 weights/
 *.csv
 *.json
@@ -20,6 +21,7 @@ pretrained/
 *.safetensors
 build_temp/
 Miniconda3-latest-Linux-x86_64.sh
+models/
 # Logs & Results
 logs/
 runs/

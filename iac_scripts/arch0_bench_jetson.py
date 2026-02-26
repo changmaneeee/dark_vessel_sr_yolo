@@ -14,6 +14,19 @@ Why this script exists:
 How to use:
 - Provide arch0 config yaml + sr weights + yolo weights
 - Provide a folder of LR images (e.g. LR val images)
+
+python iac_scripts/arch0_bench_jetson.py \
+  --arch0_config configs/experiment/arch0_sequential.yaml \
+  --sr_weights /home/octolab/dark_vessel_sr_yolo/models/rfdn/model_best.pt \
+  --yolo_weights /home/octolab/dark_vessel_sr_yolo/models/yolo8s_hr/best.pt \
+  --images_dir /home/octolab/dark_vessel_sr_yolo/dataset/smart_airbus_data_lr/images/val \
+  --max_images 2000 \
+  --warmup 20 \
+  --device cuda \
+  --half \
+  --conf 0.25 \
+  --iou 0.45 \
+  --out_json iac_runs/arch0_bench_jetson.json
 """
 
 import sys
@@ -136,8 +149,8 @@ def main():
     # FP16 option
     # We keep this simple: if --half, convert model to half and input to half.
     # (YOLO wrapper may internally handle fp16 too, but at least SR part benefits.)
-    if args.half and device == "cuda":
-        model = model.half()
+    #if args.half and device == "cuda":
+    #    model = model.half()
 
     # ---- Preload tensors (optional for stable timing) ----
     # On Jetson, disk I/O can cause jitter.
@@ -159,10 +172,13 @@ def main():
     with torch.no_grad():
         for i in range(min(args.warmup, len(tensors))):
             lr = tensors[i].to(device, non_blocking=True)
-            if args.half and device == "cuda":
-                lr = lr.half()
 
-            _ = model.inference(lr, conf_threshold=args.conf, iou_threshold=args.iou)
+            if device == "cuda":
+                torch.cuda.synchronize()
+
+            with torch.cuda.amp.autocast(enabled=args.half):
+                _ = model.inference(lr, conf_threshold=args.conf, iou_threshold=args.iou)
+
             if device == "cuda":
                 torch.cuda.synchronize()
 
@@ -173,16 +189,13 @@ def main():
     with torch.no_grad():
         for i, lr_cpu in enumerate(tensors):
             lr = lr_cpu.to(device, non_blocking=True)
-            if args.half and device == "cuda":
-                lr = lr.half()
 
-            # IMPORTANT:
-            # For GPU timing with CPU clock, synchronize before/after.
             if device == "cuda":
                 torch.cuda.synchronize()
             t0 = time.perf_counter()
 
-            out = model.inference(lr, conf_threshold=args.conf, iou_threshold=args.iou)
+            with torch.cuda.amp.autocast(enabled=args.half):
+                out = model.inference(lr, conf_threshold=args.conf, iou_threshold=args.iou)
 
             if device == "cuda":
                 torch.cuda.synchronize()

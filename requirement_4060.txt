@@ -8,27 +8,27 @@
 # =============================================================================
 
 # PyTorch (CUDA 12.1 기준, 환경에 맞게 조정)
-torch>=2.0.0
-torchvision>=0.15.0
+# torch>=2.0.0
+# torchvision>=0.15.0
 
 # YOLO
-ultralytics>=8.0.0
+# ultralytics>=8.0.0
 
 # Image Processing
-opencv-python>=4.8.0
-Pillow>=9.0.0
+# opencv-python>=4.8.0
+# Pillow>=9.0.0
 
 # Scientific Computing
-numpy>=1.24.0
-scipy>=1.10.0
+# numpy>=1.24.0
+# scipy>=1.10.0
 
 # Utilities
-tqdm>=4.65.0
-pyyaml>=6.0
+# tqdm>=4.65.0
+# pyyaml>=6.0
 
 # Logging & Visualization
-tensorboard>=2.13.0
-matplotlib>=3.7.0
+# tensorboard>=2.13.0
+# matplotlib>=3.7.0
 
 # (Optional) Jupyter
 # jupyter>=1.0.0
@@ -39,3 +39,36 @@ matplotlib>=3.7.0
 # MambaSR 사용하려면:
 #   pip install mamba-ssm causal-conv1d
 # =============================================================================
+
+# ⚠️ 주의: torch, torchvision, numpy는 젯슨 맞춤형으로 이미 설치됨 (절대 추가 금지)
+
+# Object Detection
+ultralytics>=8.0.0
+
+# Image Processing
+opencv-python>=4.8.0
+Pillow>=10.0.0
+scikit-image>=0.21.0
+
+# Configuration
+PyYAML>=6.0
+omegaconf>=2.3.0
+
+# Visualization & Utils
+matplotlib>=3.7.0
+seaborn>=0.12.0
+tqdm>=4.66.0
+rich>=13.5.0
+
+# Metrics & Data Handling
+scikit-learn>=1.3.0
+scipy>=1.11.0
+pandas>=2.0.0
+h5py>=3.9.0
+
+# Profiling (for Jetson)
+jetson-stats>=4.2.3  # nvidia-ml-py3 대신 젯슨 전용 프로파일러 사용
+psutil>=5.9.0
+
+# Data Augmentation (추론 시 전처리에 필요할 경우 유지)
+albumentations>=1.3.0
