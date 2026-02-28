@@ -1,0 +1,5 @@
+path: /
+train: /home/changmin/dark_vessel_sr_yolo/iac_runs/parity_lr/subset_lr_images.txt
+val: /home/changmin/dark_vessel_sr_yolo/iac_runs/parity_lr/subset_lr_images.txt
+names:
+- ship

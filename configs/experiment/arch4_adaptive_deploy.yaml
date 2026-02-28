@@ -38,15 +38,15 @@ model:
     high_conf: 0.45       # "확신" 기준 (이보다 높으면 SR 없이 즉시 확정)
     
     # [Sniper Strategy]
-    final_conf: 0.25      # 최종 결과 필터링 기준 (Pass 2 결과)
     sniper_conf: 0.001      # Sniper 탐지 시 사용할 confidence threshold (Pass 2 탐지 기준)
-    final_conf: 0.001      # 최종 결과 필터링 기준 (Pass 2 결과)
+    final_conf: 0.25      # 최종 결과 필터링 기준 (Pass 2 결과)
     # [Merge & Crop]
     merge_iou: 0.5        # Pass 1 박스 병합 시 NMS 기준
     roi_expansion: 1.5    # Crop 영역 확장 비율 (여유 공간)
     
     # [System]
     batch_size_sr: 32     # 한 번에 처리할 SR Crop 개수 (VRAM 최적화)
+    crop_size_lr: 64      # SR로 생성할 Crop의 크기 (YOLO 입력 크기에 맞춤)
 
 # (선택) 로깅/저장 관련 설정
 logging:

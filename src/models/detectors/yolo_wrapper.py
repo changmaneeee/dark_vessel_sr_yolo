@@ -263,7 +263,9 @@ class YOLOWrapper(nn.Module):
         self,
         x: torch.Tensor,
         conf: float = 0.25,
-        iou: float = 0.45
+        iou: float = 0.45,
+        imgsz=None,
+        max_det=300
     ) -> List[Dict[str, torch.Tensor]]:
         """
         NMS 포함 추론
@@ -272,7 +274,8 @@ class YOLOWrapper(nn.Module):
             x: 입력 이미지 [B, 3, H, W]
             conf: Confidence threshold
             iou: NMS IoU threshold
-        
+            imgsz: 이미지 크기 (optional)
+            max_det: 최대 탐지 개수
         Returns:
             List of detection dicts for each image:
             [{
@@ -284,13 +287,22 @@ class YOLOWrapper(nn.Module):
         self.eval()
         
         # Ultralytics predict 사용
-        results = self.yolo.predict(
+        kwargs = dict(
             source=x,
             conf=conf,
             iou=iou,
+#            imgsz=imgsz,
             verbose=self.verbose
         )
         
+        if imgsz is not None:
+            kwargs["imgsz"] = int(imgsz) if isinstance(imgsz, (int, float)) else imgsz
+        
+        if max_det is not None:
+            kwargs["max_det"] = int(max_det)
+
+        results = self.yolo.predict(**kwargs)
+
         # 결과 변환
         outputs = []
         for result in results:

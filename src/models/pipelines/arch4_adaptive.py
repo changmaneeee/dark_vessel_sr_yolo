@@ -39,11 +39,12 @@ class Arch4Config:
     pass1_conf: float = 0.1
     pass2_conf: float = 0.45
     final_conf: float = 0.25
+    sniper_conf: Optional[float] = None
     merge_iou: float = 0.5
-
+    
     #Crop Setting
     roi_expansion: float = 1.5
-    crop_size_lr: int = 32
+    crop_size_lr: int = 64
     batch_size_sr: int= 32
 
     def __post_init__(self):
@@ -51,6 +52,8 @@ class Arch4Config:
             raise ValueError("yolo_weights_hr must be specified")
         if not self.yolo_weights_lr:
             raise ValueError("yolo_weights_lr must be specified")
+        if self.sniper_conf is None:
+            self.sniper_conf = self.final_conf
         
 
 # =============================================================================
@@ -86,13 +89,19 @@ class Arch4Adaptive(BasePipeline):
                     return default
             return curr
         
+        yolo_classes = get_val('model.yolo.num_classes', get_val('model.yolo.classes', 1))
+        pass2_conf = get_val('model.arch4.pass2_conf', get_val('model.arch4.high_conf', 0.45))
+        final_conf = get_val('model.arch4.final_conf', 0.25)
+        sniper_conf = get_val('model.arch4.sniper_conf', None)
+
+
         return Arch4Config(
 
             upscale_factor=get_val('data.upscale_factor',4),
 
             yolo_weights_hr = get_val('model.yolo.weights_hr',''),
             yolo_weights_lr = get_val('model.yolo.weights_lr',''),
-            yolo_classes = get_val('model.yolo.num_classes',1),
+            yolo_classes = yolo_classes,
 
             sr_weights = get_val('model.sr.weights',''),
             sr_type= get_val('model.sr.type',''),
@@ -102,13 +111,15 @@ class Arch4Adaptive(BasePipeline):
             rfdn_modules = get_val('model.sr.rfdn.num_modules', 4),
 
             pass1_conf = get_val('model.arch4.pass1_conf', 0.1),
-            pass2_conf = get_val('model.arch4.pass2_conf', 0.45),
-            final_conf = get_val('model.arch4.final_conf', 0.25),
+            pass2_conf = pass2_conf,
+            sniper_conf = sniper_conf,
+            final_conf = final_conf,
             merge_iou = get_val('model.arch4.merge_iou', 0.5),
 
             #crop
             roi_expansion = get_val('model.arch4.roi_expansion', 1.5),
-            batch_size_sr = get_val('model.arch4.batch_size_sr', 32)
+            batch_size_sr = get_val('model.arch4.batch_size_sr', 32),
+            crop_size_lr = get_val('model.arch4.crop_size_lr', 64)
 
         )
     
@@ -173,8 +184,11 @@ class Arch4Adaptive(BasePipeline):
 
     def _print_info(self):
         print(f"\n[Arch4 Config]")
-        print(f" - Scout YOLO Weights (LR): {self.cfg.pass1_conf}")
-        print(f" - Sniper YOLO Weights (HR): {self.cfg.pass2_conf}")
+       # 기존 출력이 'Weights'인데 threshold를 찍고 있어서 혼동됨 → 의미를 바로잡기
+        print(f" - Scout conf(pass1_conf): {self.cfg.pass1_conf}")
+        print(f" - High conf(pass2_conf):  {self.cfg.pass2_conf}")
+        print(f" - Sniper conf(sniper_conf): {self.cfg.sniper_conf}")
+        print(f" - Final conf(final_conf):   {self.cfg.final_conf}")
         print(f" - Batch Strategy: {self.cfg.batch_size_sr} crops per SR pass")
 
 # =============================================================================
@@ -245,10 +259,19 @@ class Arch4Adaptive(BasePipeline):
                 print(f"  -> B급(애매): {len(uncertain_boxes)}개 (SR 대상)")
 
 
+            uncertain_scores = scores[uncertain_mask]
+            uncertain_classes = classes[uncertain_mask]
+
+            # 배포에서는 final_conf(보통 0.25) 미만인 B박스는 굳이 유지 안 하도록 필터
+            fb_mask = uncertain_scores >= self.cfg.final_conf
+            fb_boxes = uncertain_boxes[fb_mask]
+            fb_scores = uncertain_scores[fb_mask]
+            fb_classes = uncertain_classes[fb_mask]
+
             final_results.append({
-                'boxes': [confident_boxes],
-                'scores': [confident_scores],
-                'classes': [confident_classes]
+            'boxes': [confident_boxes, fb_boxes],
+            'scores': [confident_scores, fb_scores],
+            'classes': [confident_classes, fb_classes],
             })
 
             if len(uncertain_boxes) == 0:
@@ -277,10 +300,12 @@ class Arch4Adaptive(BasePipeline):
                 debug_info['crop_meta'] = crop_metadata
 
             # 3. Sniper 수행
+            sniper_imgsz = int(batch_crops_hr.shape[-1])
             sniper_results = self.sniper_detector.predict(
                 batch_crops_hr, 
-                conf=self.cfg.final_conf, 
-                iou=self.cfg.merge_iou
+                conf=float(self.cfg.sniper_conf), 
+                iou=self.cfg.merge_iou,
+                imgsz=sniper_imgsz
             )
             
             if debug:
@@ -288,22 +313,55 @@ class Arch4Adaptive(BasePipeline):
 
             # --- Phase 4: Assembly ---
             for i, res in enumerate(sniper_results):
-                if len(res['boxes']) == 0: continue
-                
+                if len(res['boxes']) == 0:
+                    continue
+
+                # Sniper는 낮은 conf로 후보를 넓게 뽑고,
+                # 최종 출력 기준은 final_conf로 다시 필터링
+                keep = res['scores'] >= float(self.cfg.final_conf)
+                if keep.sum().item() == 0:
+                    continue
+
+                res_boxes = res['boxes'][keep].clone().float()
+                res_scores = res['scores'][keep]
+                res_classes = res['classes'][keep]
+
                 meta = crop_metadata[i]
                 img_idx = meta[0]
-                crop_x1, crop_y1, _, _ = meta[1]
-                scale = self.cfg.upscale_factor
-                
-                # 좌표 복원
-                global_boxes = res['boxes'].clone()
-                global_boxes[:, [0, 2]] = (global_boxes[:, [0, 2]] / scale) + crop_x1
-                global_boxes[:, [1, 3]] = (global_boxes[:, [1, 3]] / scale) + crop_y1
+                ix1, iy1, ix2, iy2 = meta[1]
+
+                # 원본 LR crop 크기
+                crop_w = max(1, ix2 - ix1)
+                crop_h = max(1, iy2 - iy1)
+
+                # 리사이즈된 LR crop 한 변
+                lr_size = float(self.cfg.crop_size_lr)
+
+                # SR 배율
+                scale = float(self.cfg.upscale_factor)
+
+                # res_boxes는 "SR crop 좌표계" 기준
+                # 1) SR crop -> resized LR crop 좌표계
+                boxes_lr_resized = res_boxes / scale
+
+                # 2) resized LR crop -> original LR crop 좌표계
+                boxes_lr = boxes_lr_resized.clone()
+                boxes_lr[:, [0, 2]] *= (crop_w / lr_size)
+                boxes_lr[:, [1, 3]] *= (crop_h / lr_size)
+
+                # 3) crop origin 더해서 원본 LR 전체 이미지 좌표로 복원
+                global_boxes = boxes_lr.clone()
+                global_boxes[:, [0, 2]] += ix1
+                global_boxes[:, [1, 3]] += iy1
+
+                # 이미지 경계 보정
+                global_boxes[:, [0, 2]] = global_boxes[:, [0, 2]].clamp(0, width - 1)
+                global_boxes[:, [1, 3]] = global_boxes[:, [1, 3]].clamp(0, height - 1)
 
                 # 결과 합류
                 final_results[img_idx]['boxes'].append(global_boxes)
-                final_results[img_idx]['scores'].append(res['scores'])
-                final_results[img_idx]['classes'].append(res['classes'])
+                final_results[img_idx]['scores'].append(res_scores)
+                final_results[img_idx]['classes'].append(res_classes)
 
         # --- Final Merge (NMS) ---
         output_detections = []
