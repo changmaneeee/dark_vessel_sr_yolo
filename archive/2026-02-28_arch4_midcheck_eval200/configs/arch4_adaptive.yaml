@@ -1,0 +1,54 @@
+# =============================================================================
+# Arch4 Configuration: Confidence-Adaptive Pipeline (Dual YOLO + SR)
+# =============================================================================
+
+data:
+  # 데이터셋 경로 (절대경로 권장)
+  hr_root: "/home/changmin/smart_airbus_data"
+  hr_val_images: "images/val"  # root 기준 상대경로
+  hr_val_labels: "labels/val"
+  
+  lr_root: "/home/changmin/smart_airbus_data_lr"
+  lr_val_images: "images/val"
+  
+  upscale_factor: 4
+
+model:
+  # 1. SR Model Settings
+  sr:
+    type: "rfdn"
+    weights: "/home/changmin/dark_vessel_sr_yolo/weights/rfdn/model_best.pt"
+    # RFDN Architecture Params
+    rfdn:
+      nf: 50
+      num_modules: 4
+
+  # 2. Dual YOLO Settings
+  yolo:
+    # Sniper (HR): Pass 2용 고성능 모델
+    weights_hr: "/home/changmin/yolov8s+HR_airbus_smartdata/weights/best.pt"
+    # Scout (LR): Pass 1용 정찰 모델
+    weights_lr: "/home/changmin/yolov8s+airbus_smartdata/weights/best.pt"
+    classes: 1
+
+  # 3. Arch4 Strategy (핵심 파라미터 통합)
+  arch4:
+    # [Scout Strategy]
+    pass1_conf: 0.1       # "의심" 기준 (이보다 낮으면 버림, 높으면 1차 탐지)
+    high_conf: 0.45       # "확신" 기준 (이보다 높으면 SR 없이 즉시 확정)
+    
+    # [Sniper Strategy]
+    final_conf: 0.25      # 최종 결과 필터링 기준 (Pass 2 결과)
+    sniper_conf: 0.001      # Sniper 탐지 시 사용할 confidence threshold (Pass 2 탐지 기준)
+    final_conf: 0.001      # 최종 결과 필터링 기준 (Pass 2 결과)
+    # [Merge & Crop]
+    merge_iou: 0.5        # Pass 1 박스 병합 시 NMS 기준
+    roi_expansion: 1.5    # Crop 영역 확장 비율 (여유 공간)
+    
+    # [System]
+    batch_size_sr: 32     # 한 번에 처리할 SR Crop 개수 (VRAM 최적화)
+
+# (선택) 로깅/저장 관련 설정
+logging:
+  save_dir: "results/arch4_inference"
+  visualize: false
