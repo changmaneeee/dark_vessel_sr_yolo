@@ -1,0 +1,73 @@
+defaults:
+- ../default.yaml
+data:
+  hr_root: /home/changmin/smart_airbus_data
+  hr_val_images: /home/changmin/smart_airbus_data/images/val
+  hr_val_labels: /home/changmin/smart_airbus_data/labels/val
+  lr_root: /home/changmin/smart_airbus_data_lr
+  lr_val_images: /home/changmin/smart_airbus_data_lr/images/val
+  lr_val_labels: /home/changmin/smart_airbus_data_lr/labels/val
+  scale_factor: 4
+experiment:
+  name: arch0_sequential_baseline
+  description: Sequential SR-then-Detect baseline
+  architecture: arch0
+model:
+  pipeline: arch0_sequential
+  sr_model: rfdn
+  detector: yolov8n
+  weights:
+    sr_model: weights/rfdn/model_best.pt
+    detector: /home/changmin/dark_vessel_sr_yolo/weights/yolohr/8s/best.pt
+  sr_config:
+    input_range: 0-255
+    nf: 50
+    scale: 4
+  arch0:
+    detach_sr: true
+    use_hr_gt: false
+  yolo:
+    weights_path: /home/changmin/dark_vessel_sr_yolo/weights/yolohr/8s/best.pt
+    weights: /home/changmin/dark_vessel_sr_yolo/weights/yolohr/8s/best.pt
+training:
+  phases:
+  - name: sr_only
+    epochs: 100
+    freeze_detector: true
+    loss_weights:
+      sr_alpha: 1.0
+      det_beta: 0.0
+  - name: detector_only
+    epochs: 150
+    freeze_sr: true
+    loss_weights:
+      sr_alpha: 0.0
+      det_beta: 1.0
+  - name: joint_finetune
+    epochs: 50
+    freeze_sr: false
+    freeze_detector: false
+    loss_weights:
+      sr_alpha: 0.3
+      det_beta: 0.7
+evaluation:
+  measure_sr_quality: true
+  sr_metrics:
+  - PSNR
+  - SSIM
+  - LPIPS
+  detection_metrics:
+  - mAP@0.5
+  - mAP@0.75
+  - Recall
+  - Precision
+expected_performance:
+  pros:
+  - "SR \uD488\uC9C8 \uB192\uC74C (dedicated training)"
+  - "\uAD6C\uD604 \uB2E8\uC21C"
+  - "\uAC01 \uBAA8\uB4C8 \uB3C5\uB9BD\uC801"
+  cons:
+  - "Latency \uB192\uC74C (2-pass)"
+  - "SR \uC624\uB958\uAC00 Detection\uC5D0 \uC804\uD30C"
+  - "\uBA54\uBAA8\uB9AC \uC0AC\uC6A9\uB7C9 \uD07C (HR \uC774\uBBF8\uC9C0 \uC800\uC7A5\
+    )"

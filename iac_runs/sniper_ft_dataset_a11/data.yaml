@@ -1,0 +1,6 @@
+path: /home/changmin/dark_vessel_sr_yolo/iac_runs/sniper_ft_dataset_a11
+train: images/train
+val: images/val
+nc: 1
+names:
+- ship

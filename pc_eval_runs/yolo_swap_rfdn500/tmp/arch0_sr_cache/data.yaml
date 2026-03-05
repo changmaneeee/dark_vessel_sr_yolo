@@ -1,0 +1,5 @@
+names:
+  0: ship
+path: pc_eval_runs/yolo_swap_rfdn500/tmp/arch0_sr_cache
+train: images/val
+val: images/val

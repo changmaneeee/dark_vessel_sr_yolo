@@ -1,0 +1,36 @@
+data:
+  hr_root: /home/changmin/smart_airbus_data
+  hr_val_images: images/val
+  hr_val_labels: labels/val
+  lr_root: /home/changmin/smart_airbus_data_lr
+  lr_val_images: images/val
+  upscale_factor: 4
+model:
+  sr:
+    type: rfdn
+    weights: /home/changmin/dark_vessel_sr_yolo/weights/rfdn/model_best.pt
+    rfdn:
+      nf: 50
+      num_modules: 4
+  yolo:
+    weights_lr: /home/changmin/yolov8s+airbus_smartdata/weights/best.pt
+    weights_hr: /home/changmin/dark_vessel_sr_yolo/weights/yolo_8s_rfdn/best.pt
+    classes: 1
+  arch4:
+    pass1_conf: 0.0075
+    high_conf: 0.45
+    sniper_conf: 0.001
+    final_conf: 0.25
+    merge_iou: 0.5
+    roi_expansion: 1.75
+    crop_size_lr: 64
+    batch_size_sr: 32
+    scout_nms_iou: 0.5
+    roi_merge_iou: 0.35
+    roi_center_ratio: 0.35
+    sniper_nms_iou: 0.45
+    final_nms_iou: 0.5
+    drop_uncertain_if_sniper_hits: true
+    sniper_score_bonus: 0.05
+logging:
+  save_dir: results/arch4_roi_aware_deploy

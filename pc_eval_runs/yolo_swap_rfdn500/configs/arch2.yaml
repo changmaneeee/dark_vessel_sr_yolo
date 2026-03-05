@@ -1,0 +1,38 @@
+defaults:
+- ../default.yaml
+data:
+  hr_root: /home/changmin/smart_airbus_data
+  hr_val_images: /home/changmin/smart_airbus_data/images/val
+  lr_root: /home/changmin/smart_airbus_data_lr
+  lr_val_images: /home/changmin/smart_airbus_data_lr/images/val
+  scale_factor: 4
+  upscale_factor: 4
+experiment:
+  name: arch2_softgate
+  architecture: arch2
+model:
+  pipeline: arch2_softgate
+  sr_type: rfdn
+  rfdn:
+    nf: 50
+    num_modules: 4
+    pretrain_path: weights/rfdn/model_best.pt
+  yolo:
+    weights_path: /home/changmin/dark_vessel_sr_yolo/weights/yolohr/8s/best.pt
+    num_classes: 1
+    weights: /home/changmin/dark_vessel_sr_yolo/weights/yolohr/8s/best.pt
+  gate:
+    base_channels: 32
+    num_layers: 4
+    weights_path: training/gate_arch2/checkpoints/gate_gt/gate_best.pt
+  weights:
+    detector: /home/changmin/dark_vessel_sr_yolo/weights/yolohr/8s/best.pt
+training:
+  epochs: 300
+  batch_size: 8
+losses:
+  gate_regularization:
+    type: entropy
+    weight: 0.01
+evaluation:
+  analyze_gate_values: true

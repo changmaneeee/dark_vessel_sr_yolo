@@ -11,7 +11,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from src.models.pipelines.arch4_adaptive import Arch4Adaptive
-
+from src.models.pipelines.arch4_roi_awareNMS import Arch4RoiAwareNMS
 
 def load_yaml(p):
     with open(p, "r") as f:
@@ -84,7 +84,8 @@ def main():
     save_dir.mkdir(parents=True, exist_ok=True)
 
     cfg = load_yaml(args.arch4_config)
-    model = Arch4Adaptive(cfg)
+    #model = Arch4Adaptive(cfg)
+    model = Arch4RoiAwareNMS(cfg)
     model.eval()
 
     img = cv2.imread(args.lr_image)

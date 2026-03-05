@@ -18,8 +18,8 @@ python iac_scripts/arch4_smoke.py \
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT))
 
-from src.models.pipelines.arch4_adaptive import Arch4Adaptive
-
+#from src.models.pipelines.arch4_adaptive import Arch4Adaptive
+from src.models.pipelines.arch4_roi_awareNMS import Arch4RoiAwareNMS
 
 def load_yaml_dict(p: str) -> dict:
     with open(p, "r") as f:
@@ -89,7 +89,7 @@ def main():
     cfg = patch_arch4_config(cfg)
 
     print("[SMOKE] Build Arch4...")
-    model = Arch4Adaptive(cfg)  # 내부에서 device=cfg.device 기본을 씀(대부분 cuda)
+    model = Arch4RoiAwareNMS(cfg)  # 내부에서 device=cfg.device 기본을 씀(대부분 cuda) / Arch4Adaptive(cfg)
     model.eval()
 
     imgs = list_images(Path(args.lr_images_dir))
