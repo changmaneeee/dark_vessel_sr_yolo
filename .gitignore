@@ -168,3 +168,11 @@ docs/.doctrees/
 
 # yolo_results
 yolo_results/
+
+
+pc_eval_runs/yolo_swap_rfdn500/tmp/
+iac_scripts/pc_eval_runs/yolo_swap_rfdn500/
+iac_scripts/iac_runs/arch4_sr_sniper_check/
+
+iac_runs/
+yolo_results/
