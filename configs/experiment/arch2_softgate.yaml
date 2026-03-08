@@ -4,10 +4,10 @@ defaults:
   - ../default.yaml
 
 data:
-  hr_root: "/home/changmin/smart_airbus_data"
-  hr_val_images: "/home/changmin/smart_airbus_data/images/val"
-  lr_root: "/home/changmin/smart_airbus_data_lr"
-  lr_val_images: "/home/changmin/smart_airbus_data_lr/images/val"
+  hr_root: "/home/octolab/dark_vessel_sr_yolo/dataset/smart_airbus_data"
+  hr_val_images: "/home/octolab/dark_vessel_sr_yolo/dataset/smart_airbus_data/images/val"
+  lr_root: "/home/octolab/dark_vessel_sr_yolo/dataset/smart_airbus_data_lr"
+  lr_val_images: "/home/octolab/dark_vessel_sr_yolo/dataset/smart_airbus_data_lr/images/val"
   scale_factor: 4
   upscale_factor: 4
 
@@ -23,18 +23,18 @@ model:
   rfdn:
     nf: 50
     num_modules: 4
-    pretrain_path: "weights/rfdn/model_best.pt"
+    pretrain_path: "/home/octolab/dark_vessel_sr_yolo/models/rfdn/model_best.pt"
   
   # ★★★ YOLO 설정 ★★★
   yolo:
-    weights_path: "weights/yolohr/8s/best.pt"
+    weights_path: "/home/octolab/dark_vessel_sr_yolo/models/yolo_8s_rfdn/best.pt"
     num_classes: 1
   
   # ★★★ Gate 설정 ★★★
   gate:
     base_channels: 32
     num_layers: 4
-    weights_path: "training/gate_arch2/checkpoints/gate_gt/gate_best.pt"
+    weights_path: "/home/octolab/dark_vessel_sr_yolo/models/arch2_gate/gate_best.pt"
 
 training:
   epochs: 300

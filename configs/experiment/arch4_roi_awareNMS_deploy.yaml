@@ -7,11 +7,11 @@
 # =============================================================================
 
 data:
-  hr_root: "/home/changmin/smart_airbus_data"
+  hr_root: "/home/octolab/dark_vessel_sr_yolo/dataset/smart_airbus_data"
   hr_val_images: "images/val"
   hr_val_labels: "labels/val"
 
-  lr_root: "/home/changmin/smart_airbus_data_lr"
+  lr_root: "/home/octolab/dark_vessel_sr_yolo/dataset/smart_airbus_data_lr"
   lr_val_images: "images/val"
 
   upscale_factor: 4
@@ -19,14 +19,14 @@ data:
 model:
   sr:
     type: "rfdn"
-    weights: "/home/changmin/dark_vessel_sr_yolo/weights/rfdn/model_best.pt"
+    weights: "/home/octolab/dark_vessel_sr_yolo/models/rfdn/model_best.pt"
     rfdn:
       nf: 50
       num_modules: 4
 
   yolo:
-    weights_lr: "/home/changmin/yolov8s+airbus_smartdata/weights/best.pt"
-    weights_hr: "/home/changmin/yolov8s+HR_airbus_smartdata/weights/best.pt"
+    weights_lr: "/home/octolab/dark_vessel_sr_yolo/models/yolo8s_lr/best.pt"
+    weights_hr: "/home/octolab/dark_vessel_sr_yolo/models/sniper_ft_a11_e100/weights/best.pt"
     classes: 1
 
   arch4:

@@ -1,0 +1,16 @@
+job_name	precision	recall	map50	map5095	tp50	fp50	fn50	precision50_direct	recall50_direct	avg_ms_per_image	fps	power_source	avg_power_mw	max_power_mw	energy_per_image_j	summary_json
+arch0	None	None	None	None	None	None	None	None	None	94.87122228498265	10.54060415703416	VDD_IN	9679.967213114754	11293.0	0.9183503211867539	/home/octolab/dark_vessel_sr_yolo/jetson_runs/jetson_suite_run1_fix4/logs/arch0.summary.json
+arch2	None	None	None	None	None	None	None	None	None	96.74753220996536	10.336180956324137	VDD_IN	9526.315068493152	11451.0	0.9216474739313195	/home/octolab/dark_vessel_sr_yolo/jetson_runs/jetson_suite_run1_fix4/logs/arch2.summary.json
+arch4	0.6855093240737915	0.6153846383094788	0.6994075179100037	0.49027019739151	28	22	11	0.56	0.717948717948718	82.17785761499727	None	VDD_IN	6963.978723404255	7923.0	0.5722848519657853	/home/octolab/dark_vessel_sr_yolo/jetson_runs/jetson_suite_run1_fix4/logs/arch4.summary.json
+
+
+RUN_TAG=jetson_ftsniper_run1 \
+SR_WEIGHTS=/home/octolab/dark_vessel_sr_yolo/models/rfdn/model_best.pt \
+YOLO_SR_WEIGHTS=/home/octolab/dark_vessel_sr_yolo/models/sniper_ft_a11_e100/weights/best.pt \
+YOLO_LR_WEIGHTS=/home/octolab/dark_vessel_sr_yolo/models/yolo8s_lr/best.pt \
+GATE_WEIGHTS=/home/octolab/dark_vessel_sr_yolo/models/arch2_gate/gate_best.pt \
+ARCH4_BASE_CONFIG=/home/octolab/dark_vessel_sr_yolo/configs/experiment/arch4_roi_awareNMS_deploy.yaml \
+HR_DATA_YAML=/home/octolab/dark_vessel_sr_yolo/dataset/smart_airbus_data/data.yaml \
+LR_DATA_YAML=/home/octolab/dark_vessel_sr_yolo/dataset/smart_airbus_data_lr/data.yaml \
+LR_IMAGES_DIR=/home/octolab/dark_vessel_sr_yolo/dataset/smart_airbus_data_lr/images/val \
+bash iac_jetson/run_jetson_arch024_suite_iac.shs

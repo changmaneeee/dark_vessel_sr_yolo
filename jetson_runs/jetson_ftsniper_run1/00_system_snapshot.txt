@@ -1,0 +1,46 @@
+==== DATE ====
+2026. 03. 06. (금) 19:47:23 KST
+==== USER ====
+octolab
+==== HOST ====
+ubuntu
+==== PROJECT_ROOT ====
+/home/octolab/dark_vessel_sr_yolo
+==== OS ====
+Linux ubuntu 5.15.136-tegra #1 SMP PREEMPT Mon May 6 09:56:39 PDT 2024 aarch64 aarch64 aarch64 GNU/Linux
+==== JetPack/L4T ====
+# R36 (release), REVISION: 3.0, GCID: 36923193, BOARD: generic, EABI: aarch64, DATE: Fri Jul 19 23:24:25 UTC 2024
+# KERNEL_VARIANT: oot
+TARGET_USERSPACE_LIB_DIR=nvidia
+TARGET_USERSPACE_LIB_DIR_PATH=usr/lib/aarch64-linux-gnu/nvidia
+==== nvpmodel -q ====
+NV Power Mode: 15W
+0
+==== jetson_clocks --show ====
+SOC family:tegra234  Machine:NVIDIA Jetson Orin Nano Developer Kit
+Online CPUs: 0-5
+cpu0:  Online=1 Governor=schedutil MinFreq=729600 MaxFreq=1510400 CurrentFreq=1344000 IdleStates: WFI=1 c7=1 
+cpu1:  Online=1 Governor=schedutil MinFreq=729600 MaxFreq=1510400 CurrentFreq=1420800 IdleStates: WFI=1 c7=1 
+cpu2:  Online=1 Governor=schedutil MinFreq=729600 MaxFreq=1510400 CurrentFreq=1510400 IdleStates: WFI=1 c7=1 
+cpu3:  Online=1 Governor=schedutil MinFreq=729600 MaxFreq=1510400 CurrentFreq=1510400 IdleStates: WFI=1 c7=1 
+cpu4:  Online=1 Governor=schedutil MinFreq=729600 MaxFreq=1510400 CurrentFreq=1420800 IdleStates: WFI=1 c7=1 
+cpu5:  Online=1 Governor=schedutil MinFreq=729600 MaxFreq=1510400 CurrentFreq=883200 IdleStates: WFI=1 c7=1 
+GPU MinFreq=306000000 MaxFreq=624750000 CurrentFreq=612000000
+EMC MinFreq=204000000 MaxFreq=2133000000 CurrentFreq=2133000000 FreqOverride=0
+FAN Dynamic Speed Control=nvfancontrol hwmon0_pwm1=74
+NV Power Mode: 15W
+==== CUDA test ====
+torch: 2.4.0a0+3bcc3cddb5.nv24.07
+cuda_available: True
+gpu: Orin
+==== DISK ====
+파일 시스템     크기  사용  가용 사용% 마운트위치
+/dev/nvme0n1p1  456G   82G  352G   19% /
+tmpfs           3.8G  118M  3.7G    4% /dev/shm
+tmpfs           1.5G   35M  1.5G    3% /run
+tmpfs           5.0M  4.0K  5.0M    1% /run/lock
+tmpfs           763M  128K  762M    1% /run/user/1000
+==== MEM ====
+               총계         사용        여분      공유    버퍼/캐시    가용
+메모리:      7.4Gi       3.9Gi       914Mi       181Mi       2.7Gi       3.1Gi
+스  왑:      3.7Gi       3.0Mi       3.7Gi

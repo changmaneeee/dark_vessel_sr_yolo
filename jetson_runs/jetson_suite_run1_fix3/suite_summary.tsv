@@ -1,0 +1,4 @@
+job_name	precision	recall	map50	map5095	tp50	fp50	fn50	precision50_direct	recall50_direct	avg_ms_per_image	fps	power_source	avg_power_mw	max_power_mw	energy_per_image_j	summary_json
+arch0	None	None	None	None	None	None	None	None	None	94.91352798007028	10.53590590595239	VDD_IN	9631.065573770491	11254.0	0.9141184118139571	/home/octolab/dark_vessel_sr_yolo/jetson_runs/jetson_suite_run1_fix3/logs/arch0.summary.json
+arch2	None	None	None	None	None	None	None	None	None	94.825283079972	10.545710674616585	VDD_IN	9520.876712328767	11491.0	0.9028198294160885	/home/octolab/dark_vessel_sr_yolo/jetson_runs/jetson_suite_run1_fix3/logs/arch2.summary.json
+arch4	0.0	0.0	0.0	0.0	0	50	0	0.0	0.0	71.67992969999432	None	VDD_IN	7117.093023255814	8240.0	0.5101527275752967	/home/octolab/dark_vessel_sr_yolo/jetson_runs/jetson_suite_run1_fix3/logs/arch4.summary.json
