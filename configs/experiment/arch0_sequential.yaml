@@ -5,13 +5,13 @@ defaults:
   - ../default.yaml
 
 data:
-  hr_root: "/home/changmin/smart_airbus_data"
-  hr_val_images: "/home/changmin/smart_airbus_data/images/val"
-  hr_val_labels: "/home/changmin/smart_airbus_data/labels/val"
+  hr_root: "/home/octolab/dark_vessel_sr_yolo/dataset/smart_airbus_data"
+  hr_val_images: "/home/octolab/dark_vessel_sr_yolo/dataset/smart_airbus_data/images/val"
+  hr_val_labels: "/home/octolab/dark_vessel_sr_yolo/dataset/smart_airbus_data/labels/val"
   
-  lr_root: "/home/changmin/smart_airbus_data_lr"
-  lr_val_images: "/home/changmin/smart_airbus_data_lr/images/val"
-  lr_val_labels: "/home/changmin/smart_airbus_data_lr/labels/val"
+  lr_root: "/home/octolab/dark_vessel_sr_yolo/dataset/smart_airbus_data_lr"
+  lr_val_images: "/home/octolab/dark_vessel_sr_yolo/dataset/smart_airbus_data_lr/images/val"
+  lr_val_labels: "/home/octolab/dark_vessel_sr_yolo/dataset/smart_airbus_data_lr/labels/val"
   
   scale_factor: 4
 
@@ -28,8 +28,8 @@ model:
 
   # ★★★ Weights 경로 명시 ★★★
   weights:
-    sr_model: "weights/rfdn/model_best.pt"
-    detector: "/home/changmin/yolov8s+HR_airbus_smartdata/weights/best.pt"
+    sr_model: "/home/octolab/dark_vessel_sr_yolo/models/rfdn/model_best.pt"
+    detector: "/home/octolab/dark_vessel_sr_yolo/models/yolo_8s_rfdn/best.pt"
 
   # ★★★ SR 설정 (0-255 범위) ★★★
   sr_config:

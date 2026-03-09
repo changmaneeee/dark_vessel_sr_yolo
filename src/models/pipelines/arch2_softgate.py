@@ -69,6 +69,11 @@ class Arch2SoftGate(BasePipeline):
         self.gate_basechannels = get_val(gate_config, 'base_channels', 32)
         self.gate_num_layers = get_val(gate_config, 'num_layers', 4)
 
+        # Inference-time selective SR 설정
+        self.use_selective_inference = bool(get_val(gate_config, 'use_selective_inference', True))
+        self.inference_gate_threshold = float(get_val(gate_config, 'inference_threshold', 0.5))
+        self.blend_selected_inference = bool(get_val(gate_config, 'blend_selected_inference', False))
+
         # =====================================================================
         # Gate Network 생성
         # =====================================================================
@@ -132,6 +137,7 @@ class Arch2SoftGate(BasePipeline):
         print(f"  - Gate params: {gate_params:,}")
         print(f"  - SR params: {sr_params:,}")
         print(f"  - Total params: {total_params:,}")
+        print(f"  - Selective inference: {self.use_selective_inference} (thr={self.inference_gate_threshold:.2f}, blend={self.blend_selected_inference})")
 
     # =========================================================================
     # SR 모델 초기화 헬퍼
@@ -200,41 +206,88 @@ class Arch2SoftGate(BasePipeline):
     # Forward
     # =========================================================================
 
+    def _run_sr_model(self, lr_image: torch.Tensor) -> torch.Tensor:
+        """현재 파이프라인과 동일한 스케일링 규칙으로 SR 실행"""
+        lr_255 = lr_image * 255.0
+        sr_255 = self.sr_model(lr_255)
+        return torch.clamp(sr_255 / 255.0, 0.0, 1.0)
+
+    def _run_bypass(self, lr_image: torch.Tensor) -> torch.Tensor:
+        """SR 미적용 bypass 경로"""
+        return F.interpolate(
+            lr_image,
+            scale_factor=self.upscale_factor,
+            mode='bilinear',
+            align_corners=False
+        )
+
     def forward(
             self,
             lr_image: torch.Tensor,
-            return_intermediates: bool = False
+            return_intermediates: bool = False,
+            det_conf: Optional[float] = None,
+            det_iou: Optional[float] = None
     ) -> Dict[str, Any]:
         """Forward pass"""
         B = lr_image.size(0)
 
         # 1. Gate 예측
         gate = self.gate_network(lr_image)
+        gate_flat = gate.view(B)
 
-        # 2. SR 모델 적용
-        lr_255 = lr_image * 255.0
-        sr_255 = self.sr_model(lr_255)
-        sr_image = torch.clamp(sr_255 / 255.0, 0.0, 1.0)
-        
-        # 3. 단순 업샘플 (bypass path)
-        upsampled = F.interpolate(
-            lr_image,
-            scale_factor=self.upscale_factor,
-            mode='bilinear',
-            align_corners=False
-        )
-        
-        # 4. Soft blending
-        gate_expanded = gate.view(B, 1, 1, 1)
-        hr_image = gate_expanded * sr_image + (1 - gate_expanded) * upsampled
+        # 2. Bypass path는 항상 먼저 계산
+        upsampled = self._run_bypass(lr_image)
 
-        # 5. Detection
+        sr_image: Optional[torch.Tensor] = None
+        sr_selected_mask = torch.ones(B, dtype=torch.bool, device=lr_image.device)
+
+        # 3-A. 학습: 기존 soft blend 유지 (gradient 안정성)
+        if self.training:
+            sr_image = self._run_sr_model(lr_image)
+            gate_expanded = gate_flat.view(B, 1, 1, 1)
+            hr_image = gate_expanded * sr_image + (1 - gate_expanded) * upsampled
+
+        # 3-B. 추론: 진짜 selective SR 실행
+        elif self.use_selective_inference:
+            sr_selected_mask = gate_flat > self.inference_gate_threshold
+            hr_image = upsampled.clone()
+
+            if return_intermediates:
+                sr_image = upsampled.clone()
+
+            if sr_selected_mask.any():
+                selected_lr = lr_image[sr_selected_mask]
+                selected_sr = self._run_sr_model(selected_lr)
+
+                if self.blend_selected_inference:
+                    selected_gate = gate_flat[sr_selected_mask].view(-1, 1, 1, 1)
+                    selected_hr = selected_gate * selected_sr + (1 - selected_gate) * upsampled[sr_selected_mask]
+                else:
+                    selected_hr = selected_sr
+
+                hr_image[sr_selected_mask] = selected_hr
+
+                if return_intermediates and sr_image is not None:
+                    sr_image[sr_selected_mask] = selected_sr
+
+        # 3-C. 추론 fallback: 기존 soft blend 전체 SR
+        else:
+            sr_image = self._run_sr_model(lr_image)
+            gate_expanded = gate_flat.view(B, 1, 1, 1)
+            hr_image = gate_expanded * sr_image + (1 - gate_expanded) * upsampled
+
+        # 4. Detection
         if self.training:
             self.detector.train()
             detections = self.detector(hr_image)
         else:
             self.detector.eval()
-            detections = self.detector.predict(hr_image)
+            predict_kwargs = {}
+            if det_conf is not None:
+                predict_kwargs['conf'] = det_conf
+            if det_iou is not None:
+                predict_kwargs['iou'] = det_iou
+            detections = self.detector.predict(hr_image, **predict_kwargs)
 
         # Gate 통계 업데이트
         if self.training:
@@ -245,15 +298,18 @@ class Arch2SoftGate(BasePipeline):
 
         result = {
             'hr_image': hr_image,
-            'gate': gate, 
-            'detections': detections
+            'gate': gate,
+            'detections': detections,
+            'sr_selected_mask': sr_selected_mask
         }
 
-        if return_intermediates:
-            result['sr_image'] = sr_image
-            result['upsampled'] = upsampled
+        # 학습 시 compute_loss가 안전하게 동작하도록 중간값 보존
+        if self.training or return_intermediates:
             result['lr_image'] = lr_image
-            
+            result['upsampled'] = upsampled
+            if sr_image is not None:
+                result['sr_image'] = sr_image
+
         return result
 
     # =========================================================================
@@ -292,15 +348,20 @@ class Arch2SoftGate(BasePipeline):
 
         det_loss = det_loss_dict['total']
 
-        # SR Loss (선택적) - gradient 보장
+        # SR Loss (선택적) - training forward에서 저장한 sr_image/lr_image 사용
         sr_loss = torch.tensor(0.0, device=device)
-        
+
         if hr_gt is not None and self._sr_weight > 0:
-            if 'sr_image' in outputs:
-                sr_image = outputs['sr_image']
-            else:
-                sr_image = self.sr_model(outputs.get('lr_image', hr_image))
-            
+            sr_image = outputs.get('sr_image')
+            if sr_image is None:
+                lr_for_sr = outputs.get('lr_image')
+                if lr_for_sr is None:
+                    raise KeyError(
+                        "Arch2 compute_loss requires outputs['sr_image'] or outputs['lr_image']. "
+                        "Call forward() in training mode or with return_intermediates=True."
+                    )
+                sr_image = self._run_sr_model(lr_for_sr)
+
             sr_loss_dict = self.sr_loss_fn(sr_image, hr_gt)
             sr_loss = sr_loss_dict['total']
 
@@ -324,7 +385,7 @@ class Arch2SoftGate(BasePipeline):
             'cls_loss': det_loss_dict.get('cls_loss', torch.tensor(0.0, device=device)),
             'dfl_loss': det_loss_dict.get('dfl_loss', torch.tensor(0.0, device=device)),
             'gate_mean': gate.mean().detach(),
-            'gate_std': gate.std().detach()
+            'gate_std': gate.std(unbiased=False).detach()
         }
 
     # =========================================================================
@@ -340,15 +401,21 @@ class Arch2SoftGate(BasePipeline):
     ) -> Dict[str, Any]:
         """추론 모드"""
         self.eval()
-        
-        result = self.forward(lr_image, return_intermediates=True)
-        sr_applied = (result['gate'] > 0.5).float().mean().item()
-        
+
+        result = self.forward(
+            lr_image,
+            return_intermediates=True,
+            det_conf=conf_threshold,
+            det_iou=iou_threshold
+        )
+        sr_applied = result['sr_selected_mask'].float().mean().item()
+
         return {
             'detections': result['detections'],
             'gate': result['gate'],
             'hr_image': result['hr_image'],
-            'sr_applied_ratio': sr_applied
+            'sr_applied_ratio': sr_applied,
+            'sr_selected_mask': result['sr_selected_mask']
         }
     
     # =========================================================================
@@ -431,7 +498,10 @@ class Arch2SoftGate(BasePipeline):
                 'detector': f'YOLO ({yolo_params:,} params)'
             },
             'gate_running_mean': self.gate_running_mean.item(),
-            'upscale_factor': self.upscale_factor
+            'upscale_factor': self.upscale_factor,
+            'selective_inference': self.use_selective_inference,
+            'inference_gate_threshold': self.inference_gate_threshold,
+            'blend_selected_inference': self.blend_selected_inference
         })
         
         return info

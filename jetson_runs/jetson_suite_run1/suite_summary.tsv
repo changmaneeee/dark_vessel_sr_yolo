@@ -1,0 +1,1 @@
+job_name	precision	recall	map50	map5095	tp50	fp50	fn50	precision50_direct	recall50_direct	avg_ms_per_image	fps	power_source	avg_power_mw	max_power_mw	energy_per_image_j	summary_json
